@@ -1555,7 +1555,8 @@ def admin_matchday_set_attendance(matchday_id: int, body: SetAttendanceBody, pay
     if not in_group:
         raise HTTPException(status_code=400, detail="Player not in any group for this matchday.")
     conn.execute(
-        "INSERT OR REPLACE INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)",
+        """INSERT INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)
+           ON CONFLICT (matchday_id, player_id) DO UPDATE SET present = EXCLUDED.present""",
         [matchday_id, body.player_id, bool(body.present)],
     )
     return {"success": True, "message": "Attendance updated."}
@@ -1585,7 +1586,8 @@ def admin_matchday_set_attendance_bulk(matchday_id: int, body: BulkAttendanceBod
             ).fetchone()
             if in_group:
                 conn.execute(
-                    "INSERT OR REPLACE INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)",
+                    """INSERT INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)
+                       ON CONFLICT (matchday_id, player_id) DO UPDATE SET present = EXCLUDED.present""",
                     [matchday_id, u.player_id, bool(u.present)],
                 )
                 count += 1
