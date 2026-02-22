@@ -1567,24 +1567,34 @@ class BulkAttendanceBody(BaseModel):
 
 @router.put("/admin/matchdays/{matchday_id:int}/attendance/bulk")
 def admin_matchday_set_attendance_bulk(matchday_id: int, body: BulkAttendanceBody, payload: dict = Depends(require_admin)):
-    """Mark multiple players present or absent in one request."""
-    conn = get_conn()
-    md = _get_matchday_by_id(conn, matchday_id)
-    if not md:
-        raise HTTPException(status_code=404, detail="Matchday not found.")
-    if not md.get("groups_published"):
-        raise HTTPException(status_code=400, detail="Publish groups first.")
-    for u in body.updates:
-        in_group = conn.execute(
-            "SELECT 1 FROM FOOTBALL.matchday_group_members WHERE matchday_id = ? AND player_id = ?",
-            [matchday_id, u.player_id],
-        ).fetchone()
-        if in_group:
-            conn.execute(
-                "INSERT OR REPLACE INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)",
-                [matchday_id, u.player_id, bool(u.present)],
-            )
-    return {"success": True, "message": f"Attendance updated for {len(body.updates)} player(s)."}
+    """Mark multiple players present or absent in one request. Only real players (player_id > 0) in groups are updated."""
+    try:
+        conn = get_conn()
+        md = _get_matchday_by_id(conn, matchday_id)
+        if not md:
+            raise HTTPException(status_code=404, detail="Matchday not found.")
+        if not md.get("groups_published"):
+            raise HTTPException(status_code=400, detail="Publish groups first.")
+        count = 0
+        for u in body.updates:
+            if u.player_id <= 0:
+                continue  # skip Others / pseudo ids
+            in_group = conn.execute(
+                "SELECT 1 FROM FOOTBALL.matchday_group_members WHERE matchday_id = ? AND player_id = ?",
+                [matchday_id, u.player_id],
+            ).fetchone()
+            if in_group:
+                conn.execute(
+                    "INSERT OR REPLACE INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)",
+                    [matchday_id, u.player_id, bool(u.present)],
+                )
+                count += 1
+        return {"success": True, "message": f"Attendance updated for {count} player(s)."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Bulk attendance failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Bulk attendance failed: {str(e)}")
 
 
 @router.get("/admin/matchdays/{matchday_id:int}/attendance/summary")
