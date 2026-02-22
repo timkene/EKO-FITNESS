@@ -1554,9 +1554,9 @@ def admin_matchday_set_attendance(matchday_id: int, body: SetAttendanceBody, pay
     ).fetchone()
     if not in_group:
         raise HTTPException(status_code=400, detail="Player not in any group for this matchday.")
+    conn.execute("DELETE FROM FOOTBALL.matchday_attendance WHERE matchday_id = ? AND player_id = ?", [matchday_id, body.player_id])
     conn.execute(
-        """INSERT INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)
-           ON CONFLICT (matchday_id, player_id) DO UPDATE SET present = EXCLUDED.present""",
+        "INSERT INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)",
         [matchday_id, body.player_id, bool(body.present)],
     )
     return {"success": True, "message": "Attendance updated."}
@@ -1585,9 +1585,9 @@ def admin_matchday_set_attendance_bulk(matchday_id: int, body: BulkAttendanceBod
                 [matchday_id, u.player_id],
             ).fetchone()
             if in_group:
+                conn.execute("DELETE FROM FOOTBALL.matchday_attendance WHERE matchday_id = ? AND player_id = ?", [matchday_id, u.player_id])
                 conn.execute(
-                    """INSERT INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)
-                       ON CONFLICT (matchday_id, player_id) DO UPDATE SET present = EXCLUDED.present""",
+                    "INSERT INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)",
                     [matchday_id, u.player_id, bool(u.present)],
                 )
                 count += 1
