@@ -7,10 +7,12 @@ import Matchday from './pages/Matchday';
 import Leaderboard from './pages/Leaderboard';
 import Rules from './pages/Rules';
 import Admin from './pages/Admin';
+import { ToastProvider } from './components/Toast';
 import './App.css';
 
 function App() {
   return (
+    <ToastProvider>
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Navigate to="/login" replace />} />
@@ -26,6 +28,7 @@ function App() {
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     </BrowserRouter>
+    </ToastProvider>
   );
 }
 

@@ -111,8 +111,6 @@ export default function Admin() {
   const [addGoalAssister, setAddGoalAssister] = useState('');
   const [pendingMoves, setPendingMoves] = useState([]);
   const [attendanceSummary, setAttendanceSummary] = useState({ present: [], absent: [] });
-  const [selectedPresentIds, setSelectedPresentIds] = useState([]);
-  const [selectedAbsentIds, setSelectedAbsentIds] = useState([]);
   const [groupsSectionOpen, setGroupsSectionOpen] = useState(false);
   const [addCardFixtureId, setAddCardFixtureId] = useState(null);
   const [addCardType, setAddCardType] = useState(null);
@@ -728,6 +726,19 @@ export default function Admin() {
         <div className="p-4 md:p-8 max-w-6xl mx-auto w-full space-y-6 overflow-x-hidden">
         {tab === 'pending' && (
           <>
+            <div className="flex justify-end mb-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const link = `${window.location.origin}/signup`;
+                  navigator.clipboard.writeText(link).then(() => showToast('Signup link copied!'));
+                }}
+                className="flex items-center gap-2 py-2 px-4 bg-slate-700 text-slate-200 font-semibold rounded-lg hover:bg-slate-600 text-sm transition-colors"
+              >
+                <span className="material-symbols-outlined text-base">link</span>
+                Copy signup link
+              </button>
+            </div>
             {loadingList ? (
               <p className="text-slate-400">Loading...</p>
             ) : pending.length === 0 ? (
@@ -1057,40 +1068,57 @@ export default function Admin() {
 
                 {matchdayData.matchday?.status === 'approved' && matchdayData.matchday?.groups_published && (
                   <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6">
-                    <h4 className="font-bold mb-2">Attendance</h4>
-                    <p className="text-slate-400 text-sm mb-2">Mark who was present. Start with everyone in Absent; select players and click &quot;Move selected → Present&quot;. Use &quot;Select all&quot; or Ctrl/Cmd+Click to select multiple.</p>
-                    <p className="text-slate-500 text-xs mb-4">Only present players can be scorer/assister (except &quot;Others&quot;).</p>
+                    <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                      <h4 className="font-bold">Attendance</h4>
+                      <div className="flex items-center gap-3 text-xs text-slate-400">
+                        <span className="text-primary font-bold">{attendanceSummary.present.length} present</span>
+                        <span>·</span>
+                        <span>{attendanceSummary.absent.length} absent</span>
+                      </div>
+                    </div>
+                    <p className="text-slate-500 text-xs mb-4">Tap the toggle next to each player to mark them present or absent. Only present players can score/assist.</p>
                     {(attendanceSummary.present.length === 0 && attendanceSummary.absent.length === 0) ? (
-                      <p className="text-amber-400 text-sm">No players in groups yet. Add members to groups and publish, or refresh after publishing.</p>
+                      <p className="text-amber-400 text-sm">No players in groups yet. Publish groups first, then refresh.</p>
                     ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-sm font-medium text-slate-300 mb-1">Present ({attendanceSummary.present.length})</label>
-                          <select multiple className="w-full rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-slate-100 text-sm min-h-[140px]" value={selectedPresentIds.map(String)} onChange={(e) => setSelectedPresentIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}>
-                            {attendanceSummary.present.map((p) => <option key={p.player_id} value={p.player_id}>{p.baller_name}</option>)}
-                          </select>
-                          <div className="mt-1 flex flex-wrap gap-2 items-center">
-                            <button type="button" className="text-slate-400 hover:text-slate-200 text-xs" onClick={() => setSelectedPresentIds(attendanceSummary.present.map((p) => p.player_id))}>Select all</button>
-                            <span className="text-slate-500 text-xs">|</span>
-                            <button type="button" className="text-slate-400 hover:text-slate-200 text-xs" onClick={() => setSelectedPresentIds([])}>Clear</button>
-                          </div>
-                          <button type="button" className="mt-2 py-1.5 px-3 bg-slate-600 text-slate-100 rounded-lg text-sm font-semibold hover:bg-slate-500 disabled:opacity-50" disabled={selectedPresentIds.length === 0} onClick={async () => { if (selectedPresentIds.length === 0) return; try { await setMatchdayAttendanceBulk(selectedMatchdayId, selectedPresentIds.map((id) => ({ player_id: id, present: false })), getAdminToken()); setSelectedPresentIds([]); showToast('Moved to absent.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Move selected → Absent</button>
-                        </div>
-                        <div>
-                          <label className="block text-sm font-medium text-slate-300 mb-1">Absent ({attendanceSummary.absent.length})</label>
-                          <select multiple className="w-full rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-slate-100 text-sm min-h-[140px]" value={selectedAbsentIds.map(String)} onChange={(e) => setSelectedAbsentIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}>
-                            {attendanceSummary.absent.map((p) => <option key={p.player_id} value={p.player_id}>{p.baller_name}</option>)}
-                          </select>
-                          <div className="mt-1 flex flex-wrap gap-2 items-center">
-                            <button type="button" className="text-slate-400 hover:text-slate-200 text-xs" onClick={() => setSelectedAbsentIds(attendanceSummary.absent.map((p) => p.player_id))}>Select all</button>
-                            <span className="text-slate-500 text-xs">|</span>
-                            <button type="button" className="text-slate-400 hover:text-slate-200 text-xs" onClick={() => setSelectedAbsentIds([])}>Clear</button>
-                          </div>
-                          <button type="button" className="mt-2 py-1.5 px-3 bg-primary text-background-dark rounded-lg text-sm font-semibold hover:opacity-90 disabled:opacity-50" disabled={selectedAbsentIds.length === 0} onClick={async () => { if (selectedAbsentIds.length === 0) return; try { await setMatchdayAttendanceBulk(selectedMatchdayId, selectedAbsentIds.map((id) => ({ player_id: id, present: true })), getAdminToken()); setSelectedAbsentIds([]); showToast('Moved to present.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Move selected → Present</button>
-                        </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-80 overflow-y-auto custom-scrollbar pr-1">
+                        {[...attendanceSummary.present.map((p) => ({ ...p, present: true })), ...attendanceSummary.absent.map((p) => ({ ...p, present: false }))]
+                          .sort((a, b) => a.baller_name.localeCompare(b.baller_name))
+                          .map((p) => (
+                            <label
+                              key={p.player_id}
+                              className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg bg-slate-800/50 border border-slate-700 hover:border-primary/30 cursor-pointer transition-colors select-none"
+                            >
+                              <span className={`text-sm font-medium ${p.present ? 'text-slate-100' : 'text-slate-400'}`}>{p.baller_name}</span>
+                              <button
+                                type="button"
+                                role="switch"
+                                aria-checked={p.present}
+                                onClick={async () => {
+                                  const token = getAdminToken();
+                                  if (!token) return;
+                                  try {
+                                    await setMatchdayAttendanceBulk(selectedMatchdayId, [{ player_id: p.player_id, present: !p.present }], token);
+                                    // optimistic update
+                                    setAttendanceSummary((prev) => {
+                                      if (!p.present) {
+                                        return { present: [...prev.present, { player_id: p.player_id, baller_name: p.baller_name }], absent: prev.absent.filter((x) => x.player_id !== p.player_id) };
+                                      } else {
+                                        return { absent: [...prev.absent, { player_id: p.player_id, baller_name: p.baller_name }], present: prev.present.filter((x) => x.player_id !== p.player_id) };
+                                      }
+                                    });
+                                  } catch (e) { showToast(e.response?.data?.detail || 'Failed'); }
+                                }}
+                                className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none ${p.present ? 'bg-primary' : 'bg-slate-600'}`}
+                              >
+                                <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform ${p.present ? 'translate-x-5' : 'translate-x-0'}`} />
+                              </button>
+                            </label>
+                          ))}
                       </div>
                     )}
-                    <button type="button" className="mt-3 text-slate-400 hover:text-slate-200 text-sm" onClick={() => { const t = getAdminToken(); if (t && selectedMatchdayId) getMatchdayAttendanceSummary(selectedMatchdayId, t).then((sum) => setAttendanceSummary({ present: sum.present || [], absent: sum.absent || [] })).catch(() => setAttendanceSummary({ present: [], absent: [] })); }}>Refresh attendance list</button>
+                    <button type="button" className="mt-3 text-slate-400 hover:text-slate-200 text-sm" onClick={() => { const t = getAdminToken(); if (t && selectedMatchdayId) getMatchdayAttendanceSummary(selectedMatchdayId, t).then((sum) => setAttendanceSummary({ present: sum.present || [], absent: sum.absent || [] })).catch(() => setAttendanceSummary({ present: [], absent: [] })); }}>
+                      Refresh attendance
+                    </button>
                   </div>
                 )}
 
@@ -1189,9 +1217,19 @@ export default function Admin() {
                     <table className="w-full text-sm">
                       <thead><tr className="text-slate-400 border-b border-slate-700"><th className="text-left py-2 px-2">#</th><th className="text-left py-2 px-2">Player</th><th className="text-left py-2 px-2">Group</th><th className="text-right py-2 px-2 font-bold text-primary">Rating</th></tr></thead>
                       <tbody>
-                        {matchdayPlayerRatings.map((row, idx) => (
-                          <tr key={row.player_id} className="border-b border-slate-700/50 hover:bg-primary/5"><td className="py-2 px-2 text-slate-500">{idx + 1}</td><td className="py-2 px-2">{row.baller_name} #{row.jersey_number}</td><td className="py-2 px-2">Group {row.group_index}</td><td className="py-2 px-2 text-right font-bold text-primary">{row.rating}</td></tr>
-                        ))}
+                        {(() => {
+                          const hasCompletedFixture = matchdayFixtures.some((f) => f.status === 'completed');
+                          return matchdayPlayerRatings.map((row, idx) => (
+                            <tr key={row.player_id} className="border-b border-slate-700/50 hover:bg-primary/5">
+                              <td className="py-2 px-2 text-slate-500">{idx + 1}</td>
+                              <td className="py-2 px-2">{row.baller_name} #{row.jersey_number}</td>
+                              <td className="py-2 px-2">Group {row.group_index}</td>
+                              <td className="py-2 px-2 text-right font-bold text-primary">
+                                {hasCompletedFixture ? row.rating : <span className="text-slate-500">—</span>}
+                              </td>
+                            </tr>
+                          ));
+                        })()}
                       </tbody>
                     </table>
                   </div>

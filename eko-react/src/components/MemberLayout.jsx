@@ -4,11 +4,27 @@ import { getPlayerAuth, clearPlayerAuth } from '../pages/Login';
 import { getMemberStats } from '../api';
 import JerseyAvatar from './JerseyAvatar';
 
+function useDarkMode() {
+  const [dark, setDark] = useState(() => {
+    const saved = localStorage.getItem('eko_dark_mode');
+    if (saved !== null) return saved === 'true';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', dark);
+    localStorage.setItem('eko_dark_mode', String(dark));
+  }, [dark]);
+
+  return [dark, setDark];
+}
+
 export default function MemberLayout() {
   const navigate = useNavigate();
   const { token, player } = getPlayerAuth();
   const [menuOpen, setMenuOpen] = useState(false);
   const [starRating, setStarRating] = useState(null);
+  const [dark, setDark] = useDarkMode();
 
   useEffect(() => {
     if (!token || !player) navigate('/login', { replace: true });
@@ -75,7 +91,16 @@ export default function MemberLayout() {
           <span className="text-sm">Rules</span>
         </NavLink>
       </nav>
-      <div className="p-4 border-t border-primary/10">
+      <div className="p-4 border-t border-primary/10 space-y-2">
+        <button
+          type="button"
+          onClick={() => setDark((d) => !d)}
+          className="flex items-center gap-3 w-full px-3 py-2.5 rounded-lg text-slate-400 hover:bg-primary/5 hover:text-primary transition-colors touch-manipulation"
+          aria-label="Toggle dark mode"
+        >
+          <span className="material-symbols-outlined text-xl">{dark ? 'light_mode' : 'dark_mode'}</span>
+          <span className="text-sm">{dark ? 'Light mode' : 'Dark mode'}</span>
+        </button>
         <div className="flex items-center gap-3 p-2 rounded-xl bg-primary/5">
           <JerseyAvatar shortName={player.baller_name || player.first_name} number={player.jersey_number} />
           <div className="flex-1 min-w-0">

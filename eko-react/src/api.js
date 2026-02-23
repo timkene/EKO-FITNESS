@@ -8,6 +8,51 @@ export const footballApi = axios.create({
   timeout: 60000, // Render cold start can take 30–60s
 });
 
+// 401 interceptor: clear auth and redirect to login on expired/invalid token
+footballApi.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    if (err.response?.status === 401) {
+      const isAdminRoute = err.config?.url?.includes('/admin/');
+      if (!isAdminRoute) {
+        // Clear member session and redirect
+        localStorage.removeItem('eko_football_token');
+        localStorage.removeItem('eko_football_player');
+        if (window.location.pathname !== '/login') {
+          window.location.href = '/login';
+        }
+      }
+    }
+    return Promise.reject(err);
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Client-side in-memory cache (30s TTL) for expensive leaderboard/stats calls
+// Prevents redundant fetches when switching tabs or re-mounting components.
+// ---------------------------------------------------------------------------
+const _cache = new Map();
+const _CACHE_TTL = 30_000; // 30 seconds
+
+function cacheGet(key) {
+  const entry = _cache.get(key);
+  if (entry && Date.now() < entry.exp) return entry.value;
+  _cache.delete(key);
+  return null;
+}
+
+function cacheSet(key, value) {
+  _cache.set(key, { value, exp: Date.now() + _CACHE_TTL });
+}
+
+export function invalidateStatsCache() {
+  _cache.clear();
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
 export async function signup(data) {
   const res = await footballApi.post('/signup', data);
   return res.data;
@@ -22,6 +67,10 @@ export async function adminLogin(username, password) {
   const res = await footballApi.post('/admin/login', { username, password });
   return res.data;
 }
+
+// ---------------------------------------------------------------------------
+// Admin – players
+// ---------------------------------------------------------------------------
 
 export async function getPending(token) {
   const res = await footballApi.get('/admin/pending', {
@@ -72,6 +121,10 @@ export async function deletePlayer(playerId, token) {
   return res.data;
 }
 
+// ---------------------------------------------------------------------------
+// Admin – dues
+// ---------------------------------------------------------------------------
+
 export async function setDues(playerId, year, quarter, status, token, waiverDueBy = null) {
   const body = { year, quarter, status };
   if (waiverDueBy) body.waiver_due_by = waiverDueBy;
@@ -81,7 +134,6 @@ export async function setDues(playerId, year, quarter, status, token, waiverDueB
   return res.data;
 }
 
-/** Get dues by quarter for admin: all approved members with status for that year/quarter. */
 export async function getDuesByQuarter(token, year, quarter) {
   const res = await footballApi.get('/admin/dues-by-quarter', {
     params: { year, quarter },
@@ -90,6 +142,10 @@ export async function getDuesByQuarter(token, year, quarter) {
   return res.data;
 }
 
+// ---------------------------------------------------------------------------
+// Admin – payment evidence
+// ---------------------------------------------------------------------------
+
 export async function getPaymentEvidence(token) {
   const res = await footballApi.get('/admin/payment-evidence', {
     headers: { Authorization: `Bearer ${token}` },
@@ -97,7 +153,6 @@ export async function getPaymentEvidence(token) {
   return res.data;
 }
 
-/** Fetch payment evidence file as blob; use with URL.createObjectURL(blob) to view in new tab */
 export async function getPaymentEvidenceFile(evidenceId, token) {
   const res = await footballApi.get(`/admin/payment-evidence/${evidenceId}/file`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -119,6 +174,10 @@ export async function rejectPayment(evidenceId, token) {
   });
   return res.data;
 }
+
+// ---------------------------------------------------------------------------
+// Member – dues & waiver
+// ---------------------------------------------------------------------------
 
 export async function getMemberDues(token) {
   const res = await footballApi.get('/member/dues', {
@@ -143,7 +202,10 @@ export async function applyWaiver(dueBy, token) {
   return res.data;
 }
 
-// ----- Matchday module (by id) -----
+// ---------------------------------------------------------------------------
+// Matchday – admin
+// ---------------------------------------------------------------------------
+
 export async function listAdminMatchdays(token) {
   const res = await footballApi.get('/admin/matchdays', { headers: { Authorization: `Bearer ${token}` } });
   return res.data;
@@ -320,11 +382,13 @@ export async function endFixture(matchdayId, fixtureId, token) {
 }
 
 export async function endMatchday(matchdayId, token) {
+  invalidateStatsCache();
   const res = await footballApi.post(`/admin/matchdays/${matchdayId}/end-matchday`, null, { headers: { Authorization: `Bearer ${token}` } });
   return res.data;
 }
 
 export async function reopenMatchday(matchdayId, token) {
+  invalidateStatsCache();
   const res = await footballApi.post(`/admin/matchdays/${matchdayId}/reopen-matchday`, null, { headers: { Authorization: `Bearer ${token}` } });
   return res.data;
 }
@@ -344,23 +408,40 @@ export async function getMemberMatchdayTable(matchdayId, token) {
   return res.data;
 }
 
-// Cache-bust and request no cache so leaderboard/stats always fresh after matchday ends (avoid 304 stale data)
+// ---------------------------------------------------------------------------
+// Member stats/leaderboard — cached on client + always fresh from server
+// Cache is cleared on endMatchday/reopenMatchday above.
+// ---------------------------------------------------------------------------
+
 const noCache = { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' };
+
 function memberNoCacheHeaders(token) {
   return { Authorization: `Bearer ${token}`, ...noCache };
 }
 
 export async function getMemberStats(token) {
+  const cacheKey = `stats:${token}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
   const res = await footballApi.get(`/member/stats?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
+  cacheSet(cacheKey, res.data);
   return res.data;
 }
 
 export async function getMemberLeaderboard(token) {
+  const cacheKey = `leaderboard:${token}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
   const res = await footballApi.get(`/member/leaderboard?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
+  cacheSet(cacheKey, res.data);
   return res.data;
 }
 
 export async function getMemberTopFiveBallers(token) {
+  const cacheKey = `topfive:${token}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
   const res = await footballApi.get(`/member/top-five-ballers?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
+  cacheSet(cacheKey, res.data);
   return res.data;
 }

@@ -16,7 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 
-from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Query
+from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 # Tell clients/CDN not to cache member stats/leaderboard so members always see fresh data after matchday ends
@@ -312,14 +312,55 @@ def require_admin(authorization: str = Header(None)):
 # Routes
 # ---------------------------------------------------------------------------
 
+# Simple in-memory rate limiter: max 5 signup attempts per IP per 15 minutes
+_signup_attempts: dict = {}
+_SIGNUP_WINDOW = 900  # 15 minutes in seconds
+_SIGNUP_MAX = 5
+
+def _check_signup_rate_limit(ip: str):
+    now = _time.monotonic()
+    window_start = now - _SIGNUP_WINDOW
+    attempts = [t for t in _signup_attempts.get(ip, []) if t > window_start]
+    if len(attempts) >= _SIGNUP_MAX:
+        raise HTTPException(status_code=429, detail="Too many signup attempts. Please wait 15 minutes.")
+    attempts.append(now)
+    _signup_attempts[ip] = attempts
+
+
 @router.post("/signup")
-def signup(body: SignupRequest):
+def signup(body: SignupRequest, request: Request = None):
     """Player self-signup. Creates a pending registration."""
+    # Rate limit by IP
+    client_ip = "unknown"
+    try:
+        if request and hasattr(request, "client") and request.client:
+            client_ip = request.client.host or "unknown"
+    except Exception:
+        pass
+    _check_signup_rate_limit(client_ip)
+
     conn = get_conn()
     try:
-        cur = conn.execute(
-            "SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.players"
-        )
+        # Check jersey number is not already taken by an approved player
+        existing_jersey = conn.execute(
+            "SELECT baller_name FROM FOOTBALL.players WHERE jersey_number = ? AND status = 'approved'",
+            [body.jersey_number],
+        ).fetchone()
+        if existing_jersey:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Jersey #{body.jersey_number} is already taken by {existing_jersey[0]}. Choose a different number."
+            )
+
+        # Check baller name uniqueness (across all statuses to avoid confusion)
+        existing_name = conn.execute(
+            "SELECT id FROM FOOTBALL.players WHERE LOWER(TRIM(baller_name)) = LOWER(TRIM(?))",
+            [body.baller_name.strip()],
+        ).fetchone()
+        if existing_name:
+            raise HTTPException(status_code=400, detail="That baller name is already registered. Choose a different one.")
+
+        cur = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.players")
         next_id = cur.fetchone()[0]
 
         conn.execute("""
@@ -328,6 +369,8 @@ def signup(body: SignupRequest):
         """, [next_id, body.first_name.strip(), body.surname.strip(), body.baller_name.strip(), body.jersey_number, body.email.strip().lower(), body.whatsapp_phone.strip()])
 
         return {"success": True, "message": "Registration submitted. You will receive login details after admin approval."}
+    except HTTPException:
+        raise
     except Exception as e:
         if "UNIQUE constraint" in str(e) or "duplicate" in str(e).lower():
             raise HTTPException(status_code=400, detail="Baller name already registered.")

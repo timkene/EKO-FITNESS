@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { getPlayerAuth } from './Login';
 import { getMemberDues, submitPaymentEvidence, applyWaiver, listMemberMatchdays, getMemberMatchday, voteMatchday, getMemberStats, getMemberTopFiveBallers } from '../api';
 import JerseyAvatar from '../components/JerseyAvatar';
+import { useToast } from '../components/Toast';
+import { StatCardSkeleton, TopFiveSkeleton } from '../components/Skeleton';
 import './Dashboard.css';
 
 function useCountdown(sundayDateStr) {
@@ -34,11 +36,10 @@ function useCountdown(sundayDateStr) {
 export default function Dashboard() {
   const navigate = useNavigate();
   const { token, player } = getPlayerAuth();
+  const toast = useToast();
   const [dues, setDues] = useState(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadMsg, setUploadMsg] = useState('');
   const [waiverDue, setWaiverDue] = useState('');
-  const [waiverMsg, setWaiverMsg] = useState('');
   const [matchdays, setMatchdays] = useState([]);
   const [featuredMatchday, setFeaturedMatchday] = useState(null);
   const [voting, setVoting] = useState(false);
@@ -97,14 +98,13 @@ export default function Dashboard() {
     const file = e.target.files?.[0];
     if (!file || !token) return;
     e.target.value = '';
-    setUploadMsg('');
     setUploading(true);
     try {
       const data = await submitPaymentEvidence(file, token);
-      setUploadMsg(data.message || 'Evidence submitted. Admin will review.');
+      toast(data.message || 'Evidence submitted. Admin will review.', 'success');
       getMemberDues(token).then(setDues);
     } catch (err) {
-      setUploadMsg(err.response?.data?.detail || 'Upload failed.');
+      toast(err.response?.data?.detail || 'Upload failed.', 'error');
     } finally {
       setUploading(false);
     }
@@ -113,13 +113,12 @@ export default function Dashboard() {
   const handleApplyWaiver = async (e) => {
     e.preventDefault();
     if (!waiverDue || !token) return;
-    setWaiverMsg('');
     try {
       await applyWaiver(waiverDue, token);
-      setWaiverMsg('Waiver applied. Pay by ' + waiverDue);
+      toast('Waiver applied. Pay by ' + waiverDue, 'success');
       getMemberDues(token).then(setDues);
     } catch (err) {
-      setWaiverMsg(err.response?.data?.detail || 'Failed.');
+      toast(err.response?.data?.detail || 'Failed.', 'error');
     }
   };
 
@@ -128,7 +127,10 @@ export default function Dashboard() {
     setVoting(true);
     try {
       await voteMatchday(featuredMatchday.matchday.id, token);
+      toast('Vote recorded!', 'success');
       getMemberMatchday(featuredMatchday.matchday.id, token).then(setFeaturedMatchday);
+    } catch (err) {
+      toast(err.response?.data?.detail || 'Vote failed.', 'error');
     } finally {
       setVoting(false);
     }
@@ -164,7 +166,7 @@ export default function Dashboard() {
             EKO TOP 5 BALLERS
           </h2>
           <p className="text-slate-400 text-xs md:text-sm text-center mb-4 md:mb-6">Top 5 by rating — play to get here</p>
-          {topFiveLoading && <p className="text-primary font-medium text-center py-4">Loading…</p>}
+          {topFiveLoading && <TopFiveSkeleton />}
           {!topFiveLoading && topFiveBallers.length > 0 ? (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 md:gap-6">
               {topFiveBallers.map((b, i) => (
@@ -241,7 +243,14 @@ export default function Dashboard() {
         )}
 
         {/* My stats: 8 metrics + global rank */}
-        {token && statsLoading && <p className="text-primary font-medium">Loading your stats…</p>}
+        {token && statsLoading && (
+          <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6 md:p-8">
+            <div className="h-5 w-24 bg-slate-700/50 rounded animate-pulse mb-4" />
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              {[1,2,3,4,5,6,7,8].map((i) => <StatCardSkeleton key={i} />)}
+            </div>
+          </div>
+        )}
         {memberStats?.stats && (
           <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6 md:p-8">
             <h2 className="text-xl md:text-2xl font-bold mb-2">My stats</h2>
@@ -399,7 +408,6 @@ export default function Dashboard() {
                       <button type="submit" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg hover:bg-primary/90">Apply for waiver</button>
                     </form>
                   )}
-                  {waiverMsg && <p className="text-slate-900 dark:text-slate-100 text-sm mt-2">{waiverMsg}</p>}
                   <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="image/*,.pdf" className="hidden" />
                   <button type="button" onClick={handleSendEvidence} disabled={uploading} className="mt-4 py-2 px-4 bg-primary text-background-dark font-bold rounded-lg hover:bg-primary/90 disabled:opacity-60">
                     {uploading ? 'Uploading...' : 'Send payment evidence'}
@@ -407,7 +415,6 @@ export default function Dashboard() {
                 </>
               )}
               {dues?.pending_evidence && <p className="text-slate-900 dark:text-slate-100 text-sm mt-3">Payment evidence under review.</p>}
-              {uploadMsg && <p className="text-slate-900 dark:text-slate-100 text-sm mt-2">{uploadMsg}</p>}
             </div>
           </div>
 

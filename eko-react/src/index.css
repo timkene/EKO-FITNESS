@@ -7,9 +7,21 @@
   --font-family-display: "Lexend", sans-serif;
 }
 
+/* Tell Tailwind to use class-based dark mode so useDarkMode() toggle works */
+@variant dark (&:where(.dark, .dark *));
+
 body {
   font-family: var(--font-family-display), system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Toast fade-in animation */
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)   scale(1);    }
+}
+.animate-fade-in {
+  animation: fade-in 0.18s ease-out both;
 }
 
 .safe-area-inset-top {

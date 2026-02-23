@@ -1,26 +1,32 @@
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { getPlayerAuth } from './Login';
 import { listMemberMatchdays, getMemberMatchday, voteMatchday } from '../api';
 import JerseyAvatar from '../components/JerseyAvatar';
+import { useToast } from '../components/Toast';
+import { MatchdayListSkeleton } from '../components/Skeleton';
 import './Matchday.css';
 
+const PAGE_SIZE = 10;
+
 export default function Matchday() {
-  const navigate = useNavigate();
   const { token, player } = getPlayerAuth();
+  const toast = useToast();
   const [matchdays, setMatchdays] = useState([]);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [selectedId, setSelectedId] = useState(null);
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
   const [voting, setVoting] = useState(false);
-  const [msg, setMsg] = useState('');
 
   useEffect(() => {
     if (!token) return;
     setLoading(true);
     listMemberMatchdays(token)
       .then((d) => setMatchdays(d.matchdays || []))
-      .catch(() => setMatchdays([]))
+      .catch(() => {
+        toast('Failed to load matchdays.', 'error');
+        setMatchdays([]);
+      })
       .finally(() => setLoading(false));
   }, [token]);
 
@@ -32,26 +38,31 @@ export default function Matchday() {
     setLoading(true);
     getMemberMatchday(selectedId, token)
       .then(setDetail)
-      .catch(() => setDetail(null))
+      .catch(() => {
+        toast('Failed to load matchday.', 'error');
+        setDetail(null);
+      })
       .finally(() => setLoading(false));
   }, [token, selectedId]);
 
   const handleVote = async () => {
     if (!selectedId || !token) return;
-    setMsg('');
     setVoting(true);
     try {
       await voteMatchday(selectedId, token);
-      setMsg('Vote recorded.');
+      toast('Vote recorded!', 'success');
       getMemberMatchday(selectedId, token).then(setDetail);
     } catch (e) {
-      setMsg(e.response?.data?.detail || 'Failed');
+      toast(e.response?.data?.detail || 'Vote failed.', 'error');
     } finally {
       setVoting(false);
     }
   };
 
   if (!player) return null;
+
+  const visibleMatchdays = matchdays.slice(0, visibleCount);
+  const hasMore = matchdays.length > visibleCount;
 
   return (
     <>
@@ -60,19 +71,14 @@ export default function Matchday() {
       </header>
 
       <div className="p-4 md:p-8 space-y-6 md:space-y-8 max-w-7xl mx-auto w-full overflow-x-hidden">
-        {msg && (
-          <div className="bg-primary/10 border border-primary/20 text-primary px-4 py-3 rounded-xl text-sm font-medium">
-            {msg}
-          </div>
-        )}
 
-        {loading && !detail ? (
-          <p className="text-slate-400">Loading...</p>
+        {loading && !detail && selectedId == null ? (
+          <MatchdayListSkeleton />
         ) : selectedId == null ? (
           <>
             <p className="text-slate-400 text-sm">View past matchdays or the current one when admin has created it.</p>
             <ul className="space-y-3">
-              {matchdays.map((md) => (
+              {visibleMatchdays.map((md) => (
                 <li key={md.id} className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-xl bg-slate-900/40 border border-primary/10 hover:border-primary/20 transition-colors">
                   <div>
                     <strong className="text-white">{md.sunday_date}</strong>
@@ -88,6 +94,15 @@ export default function Matchday() {
                 </li>
               ))}
             </ul>
+            {hasMore && (
+              <button
+                type="button"
+                onClick={() => setVisibleCount((n) => n + PAGE_SIZE)}
+                className="w-full py-2 text-sm text-slate-400 hover:text-primary transition-colors border border-slate-700 rounded-xl hover:border-primary/30"
+              >
+                Show more ({matchdays.length - visibleCount} remaining)
+              </button>
+            )}
             {matchdays.length === 0 && (
               <p className="text-slate-500 text-center py-12">No matchdays yet. Admin will create one to open voting.</p>
             )}
@@ -141,7 +156,7 @@ export default function Matchday() {
               <p className="text-red-400 font-medium">This matchday was cancelled.</p>
             )}
 
-            {/* All groups: baller names only + present */}
+            {/* All groups */}
             {detail.matchday?.status === 'approved' && detail.all_groups?.length > 0 && (
               <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6">
                 <h3 className="font-bold mb-4">All groups</h3>
@@ -182,7 +197,7 @@ export default function Matchday() {
               </div>
             )}
 
-            {/* Fixtures with scores and goal details (scorer, assister) */}
+            {/* Fixtures */}
             {detail.fixtures?.length > 0 && (
               <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6">
                 <h3 className="font-bold mb-4">Fixtures</h3>
@@ -211,10 +226,11 @@ export default function Matchday() {
               </div>
             )}
 
+            {/* League table */}
             {detail.table?.length > 0 && (
               <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6 overflow-x-auto">
                 <h3 className="font-bold mb-2">League table</h3>
-                <p className="text-slate-200 text-xs mb-4">P = Played, W = Won, D = Drawn, L = Lost, GF = Goals for, GA = Goals against. Pts = 3 for a win, 1 for a draw.</p>
+                <p className="text-slate-200 text-xs mb-4">P=Played, W=Won, D=Drawn, L=Lost, GF=Goals for, GA=Goals against. Pts: 3 win, 1 draw.</p>
                 <table className="w-full min-w-[400px] text-sm">
                   <thead>
                     <tr className="text-slate-200 border-b border-slate-700">
@@ -246,7 +262,7 @@ export default function Matchday() {
               </div>
             )}
 
-            {/* Top scorers (baller names only) */}
+            {/* Top scorers */}
             {detail.top_scorers?.length > 0 && (
               <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6 overflow-x-auto">
                 <h3 className="font-bold mb-4">Top goalscorers</h3>
@@ -296,7 +312,7 @@ export default function Matchday() {
               </div>
             )}
 
-            {/* Top ratings (from 11-rating rules, per matchday) */}
+            {/* Top ratings */}
             {detail.top_ratings?.length > 0 && (
               <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6 overflow-x-auto">
                 <h3 className="font-bold mb-4">Top player ratings</h3>
@@ -321,6 +337,8 @@ export default function Matchday() {
               </div>
             )}
           </div>
+        ) : loading ? (
+          <MatchdayListSkeleton />
         ) : (
           <p className="text-slate-500">Could not load matchday.</p>
         )}
