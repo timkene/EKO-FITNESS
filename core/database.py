@@ -5,6 +5,7 @@ Optimized for performance with connection pooling and caching
 Supports both Local DuckDB and MotherDuck (cloud) via USE_LOCAL_DB environment variable.
 """
 import os
+import time as _time
 import duckdb
 from pathlib import Path
 import asyncio
@@ -29,30 +30,41 @@ if not USE_LOCAL_DB and not MOTHERDUCK_TOKEN:
 # Global connection pool (thread-safe)
 _connection_pool = {}
 _pool_lock = threading.Lock()
+_last_active: dict = {}          # thread_id -> monotonic timestamp of last use
+_IDLE_CHECK_SECS = 45 * 60      # only health-ping after 45 min of idle
+
 
 def get_db_connection(read_only=True):
     """
     Get database connection with connection pooling.
     Uses local DuckDB or MotherDuck based on USE_LOCAL_DB environment variable.
     Reuses connections to avoid overhead of creating new connections on every request.
+    The SELECT 1 health-check only runs after 45 min of idle to avoid an extra
+    MotherDuck round-trip on every single request.
     """
     thread_id = threading.get_ident()
+    now = _time.monotonic()
 
-    # Check if we have a connection for this thread
     with _pool_lock:
         if thread_id in _connection_pool:
             conn = _connection_pool[thread_id]
-            # Test if connection is still alive
+            idle = now - _last_active.get(thread_id, 0)
+            if idle < _IDLE_CHECK_SECS:
+                # Connection recently used — skip health-check, return immediately
+                _last_active[thread_id] = now
+                return conn
+            # Idle a long time — verify still alive before returning
             try:
                 conn.execute("SELECT 1")
+                _last_active[thread_id] = now
                 return conn
-            except:
-                # Connection is dead, remove it
+            except Exception:
                 try:
                     conn.close()
-                except:
+                except Exception:
                     pass
                 del _connection_pool[thread_id]
+                _last_active.pop(thread_id, None)
 
     # Create new connection
     try:
@@ -67,9 +79,9 @@ def get_db_connection(read_only=True):
             conn.execute(f"USE {MOTHERDUCK_DB}")
             print(f"☁️ Connected to MotherDuck: {MOTHERDUCK_DB}")
 
-        # Store in pool
         with _pool_lock:
             _connection_pool[thread_id] = conn
+            _last_active[thread_id] = now
 
         return conn
     except Exception as e:
