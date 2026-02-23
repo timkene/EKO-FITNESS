@@ -1041,21 +1041,25 @@ def _player_career_stats(conn, player_id: int) -> dict:
     clean_sheets = 0
     matchday_ratings_list = []
     md_rows = conn.execute("""
-        SELECT mgm.matchday_id, m.sunday_date
+        SELECT mgm.matchday_id, m.sunday_date, COALESCE(m.matchday_ended, false)
         FROM FOOTBALL.matchday_group_members mgm
         JOIN FOOTBALL.matchdays m ON m.id = mgm.matchday_id
         WHERE mgm.player_id = ?
     """, [player_id]).fetchall()
-    for mid, sunday_date in md_rows:
+    for mid, sunday_date, ended in md_rows:
         if _is_present(conn, mid, player_id):
             matchdays_present += 1
-        rt = _player_matchday_rating(conn, mid, player_id)
-        if rt != 0:
-            matchday_ratings_list.append({"matchday_id": mid, "sunday_date": str(sunday_date)[:10], "rating": rt})
-        # Clean sheets: count fixtures (not matchdays) where the group kept a clean sheet
-        g = conn.execute("SELECT group_id FROM FOOTBALL.matchday_group_members WHERE matchday_id = ? AND player_id = ?", [mid, player_id]).fetchone()
-        if g:
-            clean_sheets += _group_clean_sheet_fixtures_count(conn, mid, g[0])
+        # Only include rating in career average / leaderboard when matchday has been ended (so stars and leaderboard update after "End matchday")
+        ended_flag = bool(ended) if ended is not None else False
+        if ended_flag:
+            rt = _player_matchday_rating(conn, mid, player_id)
+            if rt != 0:
+                matchday_ratings_list.append({"matchday_id": mid, "sunday_date": str(sunday_date)[:10], "rating": rt})
+        # Clean sheets: count fixtures (not matchdays) where the group kept a clean sheet (only for ended matchdays)
+        if ended_flag:
+            g = conn.execute("SELECT group_id FROM FOOTBALL.matchday_group_members WHERE matchday_id = ? AND player_id = ?", [mid, player_id]).fetchone()
+            if g:
+                clean_sheets += _group_clean_sheet_fixtures_count(conn, mid, g[0])
     avg = round(sum(r["rating"] for r in matchday_ratings_list) / len(matchday_ratings_list), 2) if matchday_ratings_list else 0.0
     return {
         "goals": goals, "assists": assists, "yellow_cards": yellows, "red_cards": reds,
