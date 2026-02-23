@@ -324,6 +324,11 @@ export async function endMatchday(matchdayId, token) {
   return res.data;
 }
 
+export async function reopenMatchday(matchdayId, token) {
+  const res = await footballApi.post(`/admin/matchdays/${matchdayId}/reopen-matchday`, null, { headers: { Authorization: `Bearer ${token}` } });
+  return res.data;
+}
+
 export async function getMatchdayTable(matchdayId, token) {
   const res = await footballApi.get(`/admin/matchdays/${matchdayId}/table`, { headers: { Authorization: `Bearer ${token}` } });
   return res.data;

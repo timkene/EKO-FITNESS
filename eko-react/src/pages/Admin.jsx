@@ -48,6 +48,7 @@ import {
   getFixtureGoals,
   endFixture,
   endMatchday,
+  reopenMatchday,
   getMatchdayTable,
   getMatchdayPlayerRatings,
 } from '../api';
@@ -1142,6 +1143,7 @@ export default function Admin() {
                           ))}
                         </ul>
                         {!matchdayData.matchday?.matchday_ended && <button type="button" className="mt-4 py-2 px-4 bg-slate-700 text-slate-200 font-semibold rounded-lg hover:bg-slate-600" onClick={async () => { showToast(''); try { await endMatchday(selectedMatchdayId, getAdminToken()); showToast('Matchday ended.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>End matchday</button>}
+                        {matchdayData.matchday?.matchday_ended && <button type="button" className="mt-4 py-2 px-4 bg-amber-600 text-white font-semibold rounded-lg hover:bg-amber-500" onClick={async () => { showToast(''); try { await reopenMatchday(selectedMatchdayId, getAdminToken()); showToast('Matchday reopened. End it again to refresh leaderboard/stats.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Reopen matchday</button>}
                       </>
                     )}
                   </div>

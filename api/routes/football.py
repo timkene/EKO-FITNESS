@@ -2042,6 +2042,17 @@ def admin_end_matchday(matchday_id: int, payload: dict = Depends(require_admin))
     return {"success": True, "message": "Matchday ended."}
 
 
+@router.post("/admin/matchdays/{matchday_id:int}/reopen-matchday")
+def admin_reopen_matchday(matchday_id: int, payload: dict = Depends(require_admin)):
+    """Reopen an ended matchday (set matchday_ended = false). Use to re-end and refresh leaderboard/stats."""
+    conn = get_conn()
+    md = _get_matchday_by_id(conn, matchday_id)
+    if not md:
+        raise HTTPException(status_code=404, detail="Matchday not found.")
+    conn.execute("UPDATE FOOTBALL.matchdays SET matchday_ended = false WHERE id = ?", [matchday_id])
+    return {"success": True, "message": "Matchday reopened. End it again to refresh leaderboard and stats."}
+
+
 @router.get("/admin/matchdays/{matchday_id:int}/table")
 def admin_matchday_table(matchday_id: int, payload: dict = Depends(require_admin)):
     conn = get_conn()
