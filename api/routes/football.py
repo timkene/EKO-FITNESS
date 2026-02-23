@@ -642,7 +642,10 @@ def admin_payment_evidence_file(evidence_id: int, payload: dict = Depends(requir
     if not full_path.is_absolute():
         full_path = UPLOAD_DIR / (full_path.name if full_path.name else full_path)
     if not full_path.exists():
-        raise HTTPException(status_code=404, detail="File no longer available.")
+        raise HTTPException(
+            status_code=404,
+            detail="File no longer available. This evidence was uploaded before we stored files in the database. Please reject it and ask the member to resubmit.",
+        )
     return FileResponse(
         path=str(full_path),
         filename=file_name,

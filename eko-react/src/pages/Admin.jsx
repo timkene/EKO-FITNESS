@@ -564,7 +564,17 @@ export default function Admin() {
       if (w) w.focus();
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch (err) {
-      showToast(err.response?.data?.detail || 'Could not open file.');
+      let message = 'Could not open file.';
+      if (err.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const obj = JSON.parse(text);
+          if (obj.detail) message = obj.detail;
+        } catch (_) {}
+      } else if (err.response?.data?.detail) {
+        message = err.response.data.detail;
+      }
+      showToast(message);
     }
   };
 
