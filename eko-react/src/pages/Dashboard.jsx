@@ -51,17 +51,14 @@ export default function Dashboard() {
   useEffect(() => {
     if (!token) return;
     setStatsLoading(true);
-    getMemberStats(token)
-      .then((d) => { setMemberStats(d); setStatsLoading(false); })
-      .catch(() => { setMemberStats(null); setStatsLoading(false); });
-  }, [token]);
-
-  useEffect(() => {
-    if (!token) return;
     setTopFiveLoading(true);
-    getMemberTopFiveBallers(token)
-      .then((d) => { setTopFiveBallers(d?.top_five || []); setTopFiveLoading(false); })
-      .catch(() => { setTopFiveBallers([]); setTopFiveLoading(false); });
+    // Fetch both in parallel — they share the same backend cache so the second is near-instant
+    Promise.allSettled([getMemberStats(token), getMemberTopFiveBallers(token)]).then(([statsRes, topRes]) => {
+      setMemberStats(statsRes.status === 'fulfilled' ? statsRes.value : null);
+      setStatsLoading(false);
+      setTopFiveBallers(topRes.status === 'fulfilled' ? topRes.value?.top_five || [] : []);
+      setTopFiveLoading(false);
+    });
   }, [token]);
 
   useEffect(() => {

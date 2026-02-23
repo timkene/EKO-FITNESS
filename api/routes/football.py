@@ -6,6 +6,8 @@ import re
 import smtplib
 import logging
 import uuid
+import time as _time
+import threading as _threading
 from datetime import datetime, date, timedelta
 from typing import Optional
 from pathlib import Path
@@ -19,6 +21,34 @@ from fastapi.responses import FileResponse, JSONResponse
 
 # Tell clients/CDN not to cache member stats/leaderboard so members always see fresh data after matchday ends
 NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+
+# ---------------------------------------------------------------------------
+# Server-side in-memory TTL cache (avoids recomputing expensive stats on every request)
+# Invalidated whenever a matchday ends/reopens so members always see correct data.
+# ---------------------------------------------------------------------------
+_sc: dict = {}
+_sc_lock = _threading.Lock()
+_SC_TTL = 300.0  # 5 minutes
+
+
+def _sc_get(key: str):
+    with _sc_lock:
+        entry = _sc.get(key)
+        if entry and _time.monotonic() < entry[1]:
+            return entry[0]
+        if entry:
+            del _sc[key]
+        return None
+
+
+def _sc_set(key: str, value, ttl: float = _SC_TTL):
+    with _sc_lock:
+        _sc[key] = (value, _time.monotonic() + ttl)
+
+
+def _sc_clear():
+    with _sc_lock:
+        _sc.clear()
 from pydantic import BaseModel, EmailStr, Field
 
 logger = logging.getLogger(__name__)
@@ -1746,9 +1776,13 @@ def _star_rating_by_quartile(conn, _cache: Optional[dict] = None) -> dict:
 @router.get("/member/stats")
 def member_my_stats(payload: dict = Depends(require_player)):
     """Current member's stats. Uses request-scoped cache for speed."""
+    player_id = int(payload["sub"])
+    cache_key = f"stats:{player_id}"
+    cached = _sc_get(cache_key)
+    if cached is not None:
+        return JSONResponse(content=cached, headers=NO_CACHE_HEADERS)
     conn = get_conn()
     cache = {}
-    player_id = int(payload["sub"])
     stats = _player_career_stats(conn, player_id, cache)
     stars_map = _star_rating_by_quartile(conn, cache)
     star_rating = stars_map.get(player_id, 0)
@@ -1764,15 +1798,17 @@ def member_my_stats(payload: dict = Depends(require_player)):
         if row["player_id"] == player_id:
             rank = i
             break
-    return JSONResponse(
-        content={"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating},
-        headers=NO_CACHE_HEADERS,
-    )
+    result = {"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating}
+    _sc_set(cache_key, result)
+    return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
 
 
 @router.get("/member/leaderboard")
 def member_leaderboard(payload: dict = Depends(require_player)):
     """Global rating table plus top-X tables and star rating per player. Uses request-scoped cache for speed."""
+    cached = _sc_get("leaderboard")
+    if cached is not None:
+        return JSONResponse(content=cached, headers=NO_CACHE_HEADERS)
     conn = get_conn()
     cache = {}
     all_players = conn.execute("SELECT id, baller_name, jersey_number FROM FOOTBALL.players WHERE status = 'approved' AND id > 0 ORDER BY baller_name").fetchall()
@@ -1806,18 +1842,20 @@ def member_leaderboard(payload: dict = Depends(require_player)):
     top_assists = sorted(out, key=lambda x: (-x["assists"], -x["goals"], -x["average_rating"]))[:20]
     top_present = sorted(out, key=lambda x: (-x["matchdays_present"], -x["average_rating"]))[:20]
     top_clean_sheets = sorted(out, key=lambda x: (-x["clean_sheets"], -x["average_rating"]))[:20]
-    return JSONResponse(
-        content={
-            "success": True, "leaderboard": out,
-            "top_goals": top_goals, "top_assists": top_assists, "top_present": top_present, "top_clean_sheets": top_clean_sheets,
-        },
-        headers=NO_CACHE_HEADERS,
-    )
+    result = {
+        "success": True, "leaderboard": out,
+        "top_goals": top_goals, "top_assists": top_assists, "top_present": top_present, "top_clean_sheets": top_clean_sheets,
+    }
+    _sc_set("leaderboard", result)
+    return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
 
 
 @router.get("/member/top-five-ballers")
 def member_top_five_ballers(payload: dict = Depends(require_player)):
     """Top 5 players by average rating for dashboard spotlight. Uses request-scoped cache for speed."""
+    cached = _sc_get("top_five")
+    if cached is not None:
+        return JSONResponse(content=cached, headers=NO_CACHE_HEADERS)
     conn = get_conn()
     cache = {}
     all_players = conn.execute("SELECT id, baller_name, jersey_number FROM FOOTBALL.players WHERE status = 'approved' AND id > 0").fetchall()
@@ -1831,7 +1869,9 @@ def member_top_five_ballers(payload: dict = Depends(require_player)):
             "average_rating": s["average_rating"], "goals": s["goals"], "assists": s["assists"], "matchdays_present": s["matchdays_present"],
         })
     out.sort(key=lambda x: (-x["average_rating"], -x["goals"], -x["assists"]))
-    return JSONResponse(content={"success": True, "top_five": out[:5]}, headers=NO_CACHE_HEADERS)
+    result = {"success": True, "top_five": out[:5]}
+    _sc_set("top_five", result)
+    return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
 
 
 @router.post("/admin/matchdays/{matchday_id:int}/groups/publish")
@@ -2067,6 +2107,7 @@ def admin_end_matchday(matchday_id: int, payload: dict = Depends(require_admin))
         raise HTTPException(status_code=404, detail="Matchday not found.")
     conn.execute("UPDATE FOOTBALL.matchdays SET matchday_ended = true WHERE id = ?", [matchday_id])
     conn.execute("UPDATE FOOTBALL.matchday_fixtures SET status = 'completed', ended_at = COALESCE(ended_at, current_timestamp) WHERE matchday_id = ? AND status = 'in_progress'", [matchday_id])
+    _sc_clear()  # stats/leaderboard now include this matchday's results
     return {"success": True, "message": "Matchday ended."}
 
 
@@ -2078,6 +2119,7 @@ def admin_reopen_matchday(matchday_id: int, payload: dict = Depends(require_admi
     if not md:
         raise HTTPException(status_code=404, detail="Matchday not found.")
     conn.execute("UPDATE FOOTBALL.matchdays SET matchday_ended = false WHERE id = ?", [matchday_id])
+    _sc_clear()  # reset cache so stats reflect reopened state
     return {"success": True, "message": "Matchday reopened. End it again to refresh leaderboard and stats."}
 
 

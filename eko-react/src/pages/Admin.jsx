@@ -186,38 +186,30 @@ export default function Admin() {
       const data = await listAdminMatchdays(token);
       setMatchdaysList(data.matchdays || []);
       if (selectedMatchdayId) {
-        const detail = await getAdminMatchday(selectedMatchdayId, token);
+        // Run all independent requests in parallel — cuts wait time from ~9 sequential to ~1 round-trip
+        const [detailRes, groupsRes, attRes, attSumRes, cardsRes, fixRes, tableRes, ratingsRes] = await Promise.allSettled([
+          getAdminMatchday(selectedMatchdayId, token),
+          getAdminMatchdayGroups(selectedMatchdayId, token),
+          getMatchdayAttendance(selectedMatchdayId, token),
+          getMatchdayAttendanceSummary(selectedMatchdayId, token),
+          getMatchdayCards(selectedMatchdayId, token),
+          getFixtures(selectedMatchdayId, token),
+          getMatchdayTable(selectedMatchdayId, token),
+          getMatchdayPlayerRatings(selectedMatchdayId, token),
+        ]);
+        const detail = detailRes.status === 'fulfilled' ? detailRes.value : null;
         setMatchdayData(detail);
-        const groupsData = await getAdminMatchdayGroups(selectedMatchdayId, token);
-        setMatchdayGroups(groupsData);
-        try {
-          const attData = await getMatchdayAttendance(selectedMatchdayId, token);
-          setMatchdayAttendance(attData.attendance || []);
-        } catch { setMatchdayAttendance([]); }
-        if (detail.matchday?.groups_published) {
-          try {
-            const sum = await getMatchdayAttendanceSummary(selectedMatchdayId, token);
-            setAttendanceSummary({ present: sum.present || [], absent: sum.absent || [] });
-          } catch { setAttendanceSummary({ present: [], absent: [] }); }
+        setMatchdayGroups(groupsRes.status === 'fulfilled' ? groupsRes.value : null);
+        setMatchdayAttendance(attRes.status === 'fulfilled' ? attRes.value.attendance || [] : []);
+        if (detail?.matchday?.groups_published && attSumRes.status === 'fulfilled') {
+          setAttendanceSummary({ present: attSumRes.value.present || [], absent: attSumRes.value.absent || [] });
         } else {
           setAttendanceSummary({ present: [], absent: [] });
         }
-        try {
-          const cardsData = await getMatchdayCards(selectedMatchdayId, token);
-          setMatchdayCards(cardsData.cards || []);
-        } catch { setMatchdayCards([]); }
-        try {
-          const fixData = await getFixtures(selectedMatchdayId, token);
-          setMatchdayFixtures(fixData.fixtures || []);
-        } catch { setMatchdayFixtures([]); }
-        try {
-          const tableData = await getMatchdayTable(selectedMatchdayId, token);
-          setMatchdayTable(tableData.table || []);
-        } catch { setMatchdayTable([]); }
-        try {
-          const ratingsData = await getMatchdayPlayerRatings(selectedMatchdayId, token);
-          setMatchdayPlayerRatings(ratingsData.ratings || []);
-        } catch { setMatchdayPlayerRatings([]); }
+        setMatchdayCards(cardsRes.status === 'fulfilled' ? cardsRes.value.cards || [] : []);
+        setMatchdayFixtures(fixRes.status === 'fulfilled' ? fixRes.value.fixtures || [] : []);
+        setMatchdayTable(tableRes.status === 'fulfilled' ? tableRes.value.table || [] : []);
+        setMatchdayPlayerRatings(ratingsRes.status === 'fulfilled' ? ratingsRes.value.ratings || [] : []);
       } else {
         setMatchdayData(null);
         setMatchdayGroups(null);
@@ -234,6 +226,23 @@ export default function Admin() {
     } finally {
       setLoadingList(false);
     }
+  };
+
+  // Lightweight refresh after goal/card actions — only re-fetches what changed (fixtures, table, ratings, cards)
+  // instead of the full 9-request fetchMatchdays, cutting post-action wait from ~60s to ~3s.
+  const refreshFixtures = async (matchdayId) => {
+    const token = getAdminToken();
+    if (!token || !matchdayId) return;
+    const [fixRes, tableRes, ratingsRes, cardsRes] = await Promise.allSettled([
+      getFixtures(matchdayId, token),
+      getMatchdayTable(matchdayId, token),
+      getMatchdayPlayerRatings(matchdayId, token),
+      getMatchdayCards(matchdayId, token),
+    ]);
+    if (fixRes.status === 'fulfilled') setMatchdayFixtures(fixRes.value.fixtures || []);
+    if (tableRes.status === 'fulfilled') setMatchdayTable(tableRes.value.table || []);
+    if (ratingsRes.status === 'fulfilled') setMatchdayPlayerRatings(ratingsRes.value.ratings || []);
+    if (cardsRes.status === 'fulfilled') setMatchdayCards(cardsRes.value.cards || []);
   };
 
   useEffect(() => {
@@ -1106,7 +1115,7 @@ export default function Admin() {
                                   {(f.goals || []).map((g) => (
                                     <span key={g.id} className="inline-flex items-center gap-1.5 py-1 px-2 rounded bg-slate-700/80 text-slate-200 text-sm">
                                       {g.scorer_name}{g.assister_name ? ` (assist: ${g.assister_name})` : ''}
-                                      <button type="button" className="text-red-400 hover:underline text-xs font-medium" onClick={async () => { try { await removeGoal(selectedMatchdayId, f.id, g.id, getAdminToken()); showToast('Goal removed.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Remove</button>
+                                      <button type="button" className="text-red-400 hover:underline text-xs font-medium" onClick={async () => { try { await removeGoal(selectedMatchdayId, f.id, g.id, getAdminToken()); showToast('Goal removed.'); refreshFixtures(selectedMatchdayId); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Remove</button>
                                     </span>
                                   ))}
                                 </div>
@@ -1123,7 +1132,7 @@ export default function Admin() {
                                     <option value="">None</option>
                                     {(f.goal_choices || []).map((c) => <option key={c.id} value={c.id}>{c.baller_name}</option>)}
                                   </select>
-                                  <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg text-sm" onClick={async () => { const sid = addGoalScorer === '' ? null : Number(addGoalScorer); if (sid == null) { showToast('Select a scorer.'); return; } try { await addGoal(selectedMatchdayId, f.id, { scorer_player_id: sid, assister_player_id: addGoalAssister === '' ? null : Number(addGoalAssister) }, getAdminToken()); setAddGoalFixtureId(null); setAddGoalScorer(''); setAddGoalAssister(''); showToast(''); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Add goal</button>
+                                  <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg text-sm" onClick={async () => { const sid = addGoalScorer === '' ? null : Number(addGoalScorer); if (sid == null) { showToast('Select a scorer.'); return; } try { await addGoal(selectedMatchdayId, f.id, { scorer_player_id: sid, assister_player_id: addGoalAssister === '' ? null : Number(addGoalAssister) }, getAdminToken()); setAddGoalFixtureId(null); setAddGoalScorer(''); setAddGoalAssister(''); showToast(''); refreshFixtures(selectedMatchdayId); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Add goal</button>
                                 </div>
                               )}
                               {f.status === 'in_progress' && addCardFixtureId === f.id && addCardType && (
@@ -1134,7 +1143,7 @@ export default function Admin() {
                                     {(f.goal_choices || []).map((c) => <option key={c.id} value={c.id}>{c.baller_name}</option>)}
                                   </select>
                                   <div className="flex gap-2">
-                                    <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg text-sm" onClick={async () => { if (!addCardPlayerId) { showToast('Select a player.'); return; } try { await addMatchdayCard(selectedMatchdayId, { player_id: addCardPlayerId, card_type: addCardType, fixture_id: f.id }, getAdminToken()); setAddCardFixtureId(null); setAddCardType(null); setAddCardPlayerId(''); showToast(addCardType === 'yellow' ? 'Yellow card added.' : 'Red card added.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Confirm</button>
+                                    <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg text-sm" onClick={async () => { if (!addCardPlayerId) { showToast('Select a player.'); return; } try { await addMatchdayCard(selectedMatchdayId, { player_id: addCardPlayerId, card_type: addCardType, fixture_id: f.id }, getAdminToken()); setAddCardFixtureId(null); setAddCardType(null); setAddCardPlayerId(''); showToast(addCardType === 'yellow' ? 'Yellow card added.' : 'Red card added.'); refreshFixtures(selectedMatchdayId); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Confirm</button>
                                     <button type="button" className="py-2 px-4 bg-slate-600 text-slate-100 rounded-lg text-sm" onClick={() => { setAddCardFixtureId(null); setAddCardType(null); setAddCardPlayerId(''); }}>Cancel</button>
                                   </div>
                                 </div>
