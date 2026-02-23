@@ -203,6 +203,10 @@ async def lifespan(app: FastAPI):
                 delete_after DATE
             )
         """)
+        try:
+            conn.execute("ALTER TABLE FOOTBALL.payment_evidence ADD COLUMN file_content BLOB")
+        except Exception:
+            pass
         # Seed fake players only in local dev (not in production/MotherDuck) so deletions persist
         if USE_LOCAL_DB:
             try:

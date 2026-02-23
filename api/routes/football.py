@@ -17,7 +17,7 @@ from email.mime.base import MIMEBase
 from email import encoders
 
 from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 # Tell clients/CDN not to cache member stats/leaderboard so members always see fresh data after matchday ends
 NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
@@ -619,23 +619,30 @@ def admin_payment_evidence(payload: dict = Depends(require_admin)):
 
 @router.get("/admin/payment-evidence/{evidence_id:int}/file")
 def admin_payment_evidence_file(evidence_id: int, payload: dict = Depends(require_admin)):
-    """View/download payment evidence file before approving or rejecting."""
+    """View/download payment evidence file before approving or rejecting. Serves from DB (file_content) when present, else from disk."""
     conn = get_conn()
     row = conn.execute(
-        "SELECT file_path, file_name FROM FOOTBALL.payment_evidence WHERE id = ? AND status = 'pending'",
+        "SELECT file_path, file_name, file_content FROM FOOTBALL.payment_evidence WHERE id = ? AND status = 'pending'",
         [evidence_id],
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Evidence not found or already reviewed.")
-    file_path, file_name = row
+    file_path, file_name, file_content = row
+    suffix = (Path(file_name).suffix or "").lower()
+    media_types = {".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
+    media_type = media_types.get(suffix, "application/octet-stream")
+    # Prefer DB-stored bytes (survives Render ephemeral filesystem)
+    if file_content is not None and len(file_content) > 0:
+        return Response(
+            content=bytes(file_content),
+            media_type=media_type,
+            headers={"Content-Disposition": f'inline; filename="{file_name}"'},
+        )
     full_path = Path(file_path)
     if not full_path.is_absolute():
         full_path = UPLOAD_DIR / (full_path.name if full_path.name else full_path)
     if not full_path.exists():
         raise HTTPException(status_code=404, detail="File no longer available.")
-    suffix = (Path(file_name).suffix or "").lower()
-    media_types = {".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".gif": "image/gif", ".webp": "image/webp"}
-    media_type = media_types.get(suffix, "application/octet-stream")
     return FileResponse(
         path=str(full_path),
         filename=file_name,
@@ -735,18 +742,21 @@ async def member_payment_evidence(
     ).fetchone()
     if pending_row:
         raise HTTPException(status_code=400, detail="You already have payment evidence under review. Wait for it to be approved or rejected before sending another.")
+    content = await file.read()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     ext = Path(file.filename).suffix or ""
     safe_name = f"{uuid.uuid4().hex}{ext}"
     path = UPLOAD_DIR / safe_name
-    content = await file.read()
-    with open(path, "wb") as f:
-        f.write(content)
+    try:
+        with open(path, "wb") as f:
+            f.write(content)
+    except OSError:
+        pass  # e.g. read-only filesystem on Render; DB store below is enough
     next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.payment_evidence").fetchone()[0]
     conn.execute("""
-        INSERT INTO FOOTBALL.payment_evidence (id, player_id, year, quarter, file_path, file_name, status)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending')
-    """, [next_id, player_id, year, q, str(path), file.filename or safe_name])
+        INSERT INTO FOOTBALL.payment_evidence (id, player_id, year, quarter, file_path, file_name, file_content, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+    """, [next_id, player_id, year, q, str(path), file.filename or safe_name, content])
     return {"success": True, "message": "Payment evidence submitted. Admin will review it."}
 
 
