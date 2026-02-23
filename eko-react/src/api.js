@@ -351,7 +351,7 @@ function memberNoCacheHeaders(token) {
 }
 
 export async function getMemberStats(token) {
-  const res = await footballApi.get(`/member/stats?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token) });
+  const res = await footballApi.get(`/member/stats?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
   return res.data;
 }
 
@@ -361,6 +361,6 @@ export async function getMemberLeaderboard(token) {
 }
 
 export async function getMemberTopFiveBallers(token) {
-  const res = await footballApi.get(`/member/top-five-ballers?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token) });
+  const res = await footballApi.get(`/member/top-five-ballers?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
   return res.data;
 }

@@ -45,12 +45,14 @@ function TopTable({ title, list, metricKey, metricLabel, playerId }) {
 export default function Leaderboard() {
   const { token, player } = getPlayerAuth();
   const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!token) return;
+    setLoading(true);
     getMemberLeaderboard(token)
-      .then((d) => setData(d))
-      .catch(() => setData(null));
+      .then((d) => { setData(d); setLoading(false); })
+      .catch(() => { setData(null); setLoading(false); });
   }, [token]);
 
   if (!player) return null;
@@ -68,6 +70,7 @@ export default function Leaderboard() {
       </header>
 
       <div className="p-4 md:p-8 max-w-5xl mx-auto w-full space-y-6 md:space-y-8 pb-safe">
+        {loading && <p className="text-primary font-medium">Loading leaderboard…</p>}
         <p className="text-slate-400 text-xs md:text-sm mb-3 md:mb-4">Ranked by average rating. Your row is highlighted.</p>
         <div className="overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0">
           <table className="w-full text-xs md:text-sm min-w-[580px]">
@@ -106,7 +109,7 @@ export default function Leaderboard() {
             </tbody>
           </table>
         </div>
-        {leaderboard.length === 0 && <p className="text-slate-500 text-center py-8">No ratings yet. Play matchdays to appear on the table.</p>}
+        {!loading && leaderboard.length === 0 && <p className="text-slate-500 text-center py-8">No ratings yet. Play matchdays to appear on the table.</p>}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4 pt-4">
           <TopTable title="Top goals overall" list={topGoals} metricKey="goals" metricLabel="Goals" playerId={player.id} />

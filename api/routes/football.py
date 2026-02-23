@@ -967,8 +967,8 @@ def _top_scorers_assists(conn, matchday_id: int):
     return top_scorers, top_assists
 
 
-def _player_matchday_rating(conn, matchday_id: int, player_id: int) -> float:
-    """Compute rating for one player for one matchday. Only real players (player_id > 0). Before any fixture is completed, all present get 5."""
+def _player_matchday_rating(conn, matchday_id: int, player_id: int, _cache: Optional[dict] = None) -> float:
+    """Compute rating for one player for one matchday. Optional _cache dict (keyed ('league', mid) and ('clean_sheet', mid, gid)) speeds up repeated calls."""
     if player_id <= 0:
         return 0.0
     in_group = conn.execute("SELECT group_id FROM FOOTBALL.matchday_group_members WHERE matchday_id = ? AND player_id = ?", [matchday_id, player_id]).fetchone()
@@ -989,16 +989,18 @@ def _player_matchday_rating(conn, matchday_id: int, player_id: int) -> float:
         placeholders = ",".join("?" * len(fixture_ids))
         goals = conn.execute(f"SELECT COUNT(*) FROM FOOTBALL.fixture_goals WHERE fixture_id IN ({placeholders}) AND scorer_player_id = ?", fixture_ids + [player_id]).fetchone()[0]
         rating += goals * 2
-        # 9. Hat-trick: +5
         if goals >= 3:
             rating += 5
-    # 3. Assists: +1 each
     if fixture_ids:
         placeholders = ",".join("?" * len(fixture_ids))
         assists = conn.execute(f"SELECT COUNT(*) FROM FOOTBALL.fixture_goals WHERE fixture_id IN ({placeholders}) AND assister_player_id = ?", fixture_ids + [player_id]).fetchone()[0]
         rating += assists
-    # 4-7. Position: 1st +5, 2nd +3, 3rd +2, 4th +1
-    table = _league_table(conn, matchday_id)
+    if _cache is not None:
+        if ("league", matchday_id) not in _cache:
+            _cache[("league", matchday_id)] = _league_table(conn, matchday_id)
+        table = _cache[("league", matchday_id)]
+    else:
+        table = _league_table(conn, matchday_id)
     for pos, row in enumerate(table, 1):
         if row["group_id"] == group_id:
             if pos == 1: rating += 5
@@ -1006,11 +1008,13 @@ def _player_matchday_rating(conn, matchday_id: int, player_id: int) -> float:
             elif pos == 3: rating += 2
             elif pos == 4: rating += 1
             break
-    # 8. Clean sheet: +1 per fixture in which the group kept a clean sheet (conceded 0 in that fixture)
-    clean_sheet_fixtures = _group_clean_sheet_fixtures_count(conn, matchday_id, group_id)
-    rating += clean_sheet_fixtures
-    # 10. Yellow: -5 each
-    # 11. Red: -10 each
+    if _cache is not None:
+        key = ("clean_sheet", matchday_id, group_id)
+        if key not in _cache:
+            _cache[key] = _group_clean_sheet_fixtures_count(conn, matchday_id, group_id)
+        rating += _cache[key]
+    else:
+        rating += _group_clean_sheet_fixtures_count(conn, matchday_id, group_id)
     cards = conn.execute("SELECT yellow_count, red_count FROM FOOTBALL.matchday_cards WHERE matchday_id = ? AND player_id = ?", [matchday_id, player_id]).fetchone()
     if cards:
         rating -= cards[0] * 5 + cards[1] * 10
@@ -1028,18 +1032,15 @@ def _top_ratings_for_matchday(conn, matchday_id: int):
     return sorted(out, key=lambda x: -x["rating"])
 
 
-def _player_career_stats(conn, player_id: int) -> dict:
-    """Career stats for one player: goals, assists, yellows, reds, clean_sheets, matchdays_present, per_matchday_ratings, average_rating."""
+def _player_career_stats(conn, player_id: int, _cache: Optional[dict] = None) -> dict:
+    """Career stats for one player. Optional _cache speeds up repeated calls (league table + clean sheet per matchday/group)."""
     if player_id <= 0:
         return {"goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0, "clean_sheets": 0, "matchdays_present": 0, "matchday_ratings": [], "average_rating": 0.0}
-    # Goals/assists: all fixture_goals
     goals = conn.execute("SELECT COUNT(*) FROM FOOTBALL.fixture_goals g JOIN FOOTBALL.matchday_fixtures f ON f.id = g.fixture_id WHERE g.scorer_player_id = ?", [player_id]).fetchone()[0]
     assists = conn.execute("SELECT COUNT(*) FROM FOOTBALL.fixture_goals g JOIN FOOTBALL.matchday_fixtures f ON f.id = g.fixture_id WHERE g.assister_player_id = ?", [player_id]).fetchone()[0]
-    # Cards: sum matchday_cards
     cards = conn.execute("SELECT COALESCE(SUM(yellow_count), 0), COALESCE(SUM(red_count), 0) FROM FOOTBALL.matchday_cards WHERE player_id = ?", [player_id]).fetchone()
     yellows = cards[0] or 0
     reds = cards[1] or 0
-    # Matchdays present: count where in group and present
     matchdays_present = 0
     clean_sheets = 0
     matchday_ratings_list = []
@@ -1052,17 +1053,21 @@ def _player_career_stats(conn, player_id: int) -> dict:
     for mid, sunday_date, ended in md_rows:
         if _is_present(conn, mid, player_id):
             matchdays_present += 1
-        # Only include rating in career average / leaderboard when matchday has been ended (so stars and leaderboard update after "End matchday")
         ended_flag = bool(ended) if ended is not None else False
         if ended_flag:
-            rt = _player_matchday_rating(conn, mid, player_id)
+            rt = _player_matchday_rating(conn, mid, player_id, _cache)
             if rt != 0:
                 matchday_ratings_list.append({"matchday_id": mid, "sunday_date": str(sunday_date)[:10], "rating": rt})
-        # Clean sheets: count fixtures (not matchdays) where the group kept a clean sheet (only for ended matchdays)
         if ended_flag:
             g = conn.execute("SELECT group_id FROM FOOTBALL.matchday_group_members WHERE matchday_id = ? AND player_id = ?", [mid, player_id]).fetchone()
             if g:
-                clean_sheets += _group_clean_sheet_fixtures_count(conn, mid, g[0])
+                if _cache is not None:
+                    key = ("clean_sheet", mid, g[0])
+                    if key not in _cache:
+                        _cache[key] = _group_clean_sheet_fixtures_count(conn, mid, g[0])
+                    clean_sheets += _cache[key]
+                else:
+                    clean_sheets += _group_clean_sheet_fixtures_count(conn, mid, g[0])
     avg = round(sum(r["rating"] for r in matchday_ratings_list) / len(matchday_ratings_list), 2) if matchday_ratings_list else 0.0
     return {
         "goals": goals, "assists": assists, "yellow_cards": yellows, "red_cards": reds,
@@ -1710,12 +1715,12 @@ def admin_matchday_add_card(matchday_id: int, body: AddCardBody, payload: dict =
     return {"success": True, "message": "Card added (Others – no rating impact)."}
 
 
-def _star_rating_by_quartile(conn) -> dict:
-    """Return dict player_id -> stars (0-5). 0 = no matchday concluded yet. Once at least one player has ratings, 5/4/3/1 by quartile."""
+def _star_rating_by_quartile(conn, _cache: Optional[dict] = None) -> dict:
+    """Return dict player_id -> stars (0-5). Optional _cache speeds up repeated _player_career_stats calls."""
     all_players = conn.execute("SELECT id FROM FOOTBALL.players WHERE status = 'approved' AND id > 0").fetchall()
     rated = []
     for (pid,) in all_players:
-        s = _player_career_stats(conn, pid)
+        s = _player_career_stats(conn, pid, _cache)
         if s["matchday_ratings"]:
             rated.append((pid, s["average_rating"]))
     if not rated:
@@ -1740,17 +1745,17 @@ def _star_rating_by_quartile(conn) -> dict:
 
 @router.get("/member/stats")
 def member_my_stats(payload: dict = Depends(require_player)):
-    """Current member's stats: goals, assists, cards, clean sheets, matchdays present, per-matchday ratings, average rating, global rank, and star rating (1-5 by quartile)."""
+    """Current member's stats. Uses request-scoped cache for speed."""
     conn = get_conn()
+    cache = {}
     player_id = int(payload["sub"])
-    stats = _player_career_stats(conn, player_id)
-    stars_map = _star_rating_by_quartile(conn)
+    stats = _player_career_stats(conn, player_id, cache)
+    stars_map = _star_rating_by_quartile(conn, cache)
     star_rating = stars_map.get(player_id, 0)
-    # Global rank: all players with at least one matchday rating, sorted by average_rating desc; rank = 1-based index
     all_players = conn.execute("SELECT id FROM FOOTBALL.players WHERE status = 'approved' AND id > 0").fetchall()
     leader = []
     for (pid,) in all_players:
-        s = _player_career_stats(conn, pid)
+        s = _player_career_stats(conn, pid, cache)
         if s["matchday_ratings"]:
             leader.append({"player_id": pid, "average_rating": s["average_rating"]})
     leader.sort(key=lambda x: -x["average_rating"])
@@ -1767,12 +1772,13 @@ def member_my_stats(payload: dict = Depends(require_player)):
 
 @router.get("/member/leaderboard")
 def member_leaderboard(payload: dict = Depends(require_player)):
-    """Global rating table plus top-X tables and star rating per player."""
+    """Global rating table plus top-X tables and star rating per player. Uses request-scoped cache for speed."""
     conn = get_conn()
+    cache = {}
     all_players = conn.execute("SELECT id, baller_name, jersey_number FROM FOOTBALL.players WHERE status = 'approved' AND id > 0 ORDER BY baller_name").fetchall()
     out = []
     for pid, baller, jersey in all_players:
-        s = _player_career_stats(conn, pid)
+        s = _player_career_stats(conn, pid, cache)
         out.append({
             "player_id": pid, "baller_name": baller, "jersey_number": jersey or 0,
             "goals": s["goals"], "assists": s["assists"],
@@ -1781,7 +1787,19 @@ def member_leaderboard(payload: dict = Depends(require_player)):
             "average_rating": s["average_rating"],
         })
     out.sort(key=lambda x: (-x["average_rating"], -x["goals"], -x["assists"]))
-    stars = _star_rating_by_quartile(conn)
+    # Compute stars from this list (quartiles by average_rating) so we don't call _star_rating_by_quartile again
+    rated = [(r["player_id"], r["average_rating"]) for r in out if r["average_rating"] > 0]
+    n = len(rated)
+    stars = {r["player_id"]: 0 for r in out}
+    for i, (pid, _) in enumerate(rated):
+        if i < n // 4:
+            stars[pid] = 5
+        elif i < n // 2:
+            stars[pid] = 4
+        elif i < (3 * n) // 4:
+            stars[pid] = 3
+        else:
+            stars[pid] = 1
     for row in out:
         row["star_rating"] = stars.get(row["player_id"], 0)
     top_goals = sorted(out, key=lambda x: (-x["goals"], -x["assists"], -x["average_rating"]))[:20]
@@ -1799,12 +1817,13 @@ def member_leaderboard(payload: dict = Depends(require_player)):
 
 @router.get("/member/top-five-ballers")
 def member_top_five_ballers(payload: dict = Depends(require_player)):
-    """Top 5 players by average rating for dashboard spotlight (jersey_number for avatar)."""
+    """Top 5 players by average rating for dashboard spotlight. Uses request-scoped cache for speed."""
     conn = get_conn()
+    cache = {}
     all_players = conn.execute("SELECT id, baller_name, jersey_number FROM FOOTBALL.players WHERE status = 'approved' AND id > 0").fetchall()
     out = []
     for pid, baller, jersey in all_players:
-        s = _player_career_stats(conn, pid)
+        s = _player_career_stats(conn, pid, cache)
         if not s["matchday_ratings"]:
             continue
         out.append({

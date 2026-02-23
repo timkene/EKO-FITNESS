@@ -43,21 +43,25 @@ export default function Dashboard() {
   const [featuredMatchday, setFeaturedMatchday] = useState(null);
   const [voting, setVoting] = useState(false);
   const [memberStats, setMemberStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(true);
   const [topFiveBallers, setTopFiveBallers] = useState([]);
+  const [topFiveLoading, setTopFiveLoading] = useState(true);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
     if (!token) return;
+    setStatsLoading(true);
     getMemberStats(token)
-      .then((d) => setMemberStats(d))
-      .catch(() => setMemberStats(null));
+      .then((d) => { setMemberStats(d); setStatsLoading(false); })
+      .catch(() => { setMemberStats(null); setStatsLoading(false); });
   }, [token]);
 
   useEffect(() => {
     if (!token) return;
+    setTopFiveLoading(true);
     getMemberTopFiveBallers(token)
-      .then((d) => setTopFiveBallers(d?.top_five || []))
-      .catch(() => setTopFiveBallers([]));
+      .then((d) => { setTopFiveBallers(d?.top_five || []); setTopFiveLoading(false); })
+      .catch(() => { setTopFiveBallers([]); setTopFiveLoading(false); });
   }, [token]);
 
   useEffect(() => {
@@ -163,7 +167,8 @@ export default function Dashboard() {
             EKO TOP 5 BALLERS
           </h2>
           <p className="text-slate-400 text-xs md:text-sm text-center mb-4 md:mb-6">Top 5 by rating — play to get here</p>
-          {topFiveBallers.length > 0 ? (
+          {topFiveLoading && <p className="text-primary font-medium text-center py-4">Loading…</p>}
+          {!topFiveLoading && topFiveBallers.length > 0 ? (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 md:gap-6">
               {topFiveBallers.map((b, i) => (
                 <div key={b.player_id} className="flex flex-col items-center text-center min-w-0">
@@ -181,9 +186,9 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
-          ) : (
+          ) : !topFiveLoading ? (
             <p className="text-slate-400 text-center py-4 md:py-6 text-sm md:text-base px-2">Complete at least one matchday to see the EKO TOP 5 BALLERS.</p>
-          )}
+          ) : null}
         </div>
 
         {/* Hero: Featured match + countdown (same UX as reference) */}
@@ -239,6 +244,7 @@ export default function Dashboard() {
         )}
 
         {/* My stats: 8 metrics + global rank */}
+        {token && statsLoading && <p className="text-primary font-medium">Loading your stats…</p>}
         {memberStats?.stats && (
           <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6 md:p-8">
             <h2 className="text-xl md:text-2xl font-bold mb-2">My stats</h2>
