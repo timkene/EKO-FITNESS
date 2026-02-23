@@ -15,7 +15,10 @@ from email.mime.base import MIMEBase
 from email import encoders
 
 from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+
+# Tell clients/CDN not to cache member stats/leaderboard so members always see fresh data after matchday ends
+NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
 from pydantic import BaseModel, EmailStr, Field
 
 logger = logging.getLogger(__name__)
@@ -1756,7 +1759,10 @@ def member_my_stats(payload: dict = Depends(require_player)):
         if row["player_id"] == player_id:
             rank = i
             break
-    return {"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating}
+    return JSONResponse(
+        content={"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating},
+        headers=NO_CACHE_HEADERS,
+    )
 
 
 @router.get("/member/leaderboard")
@@ -1782,10 +1788,13 @@ def member_leaderboard(payload: dict = Depends(require_player)):
     top_assists = sorted(out, key=lambda x: (-x["assists"], -x["goals"], -x["average_rating"]))[:20]
     top_present = sorted(out, key=lambda x: (-x["matchdays_present"], -x["average_rating"]))[:20]
     top_clean_sheets = sorted(out, key=lambda x: (-x["clean_sheets"], -x["average_rating"]))[:20]
-    return {
-        "success": True, "leaderboard": out,
-        "top_goals": top_goals, "top_assists": top_assists, "top_present": top_present, "top_clean_sheets": top_clean_sheets,
-    }
+    return JSONResponse(
+        content={
+            "success": True, "leaderboard": out,
+            "top_goals": top_goals, "top_assists": top_assists, "top_present": top_present, "top_clean_sheets": top_clean_sheets,
+        },
+        headers=NO_CACHE_HEADERS,
+    )
 
 
 @router.get("/member/top-five-ballers")
@@ -1803,7 +1812,7 @@ def member_top_five_ballers(payload: dict = Depends(require_player)):
             "average_rating": s["average_rating"], "goals": s["goals"], "assists": s["assists"], "matchdays_present": s["matchdays_present"],
         })
     out.sort(key=lambda x: (-x["average_rating"], -x["goals"], -x["assists"]))
-    return {"success": True, "top_five": out[:5]}
+    return JSONResponse(content={"success": True, "top_five": out[:5]}, headers=NO_CACHE_HEADERS)
 
 
 @router.post("/admin/matchdays/{matchday_id:int}/groups/publish")

@@ -344,17 +344,23 @@ export async function getMemberMatchdayTable(matchdayId, token) {
   return res.data;
 }
 
+// Cache-bust and request no cache so leaderboard/stats always fresh after matchday ends (avoid 304 stale data)
+const noCache = { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' };
+function memberNoCacheHeaders(token) {
+  return { Authorization: `Bearer ${token}`, ...noCache };
+}
+
 export async function getMemberStats(token) {
-  const res = await footballApi.get('/member/stats', { headers: { Authorization: `Bearer ${token}` } });
+  const res = await footballApi.get(`/member/stats?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token) });
   return res.data;
 }
 
 export async function getMemberLeaderboard(token) {
-  const res = await footballApi.get('/member/leaderboard', { headers: { Authorization: `Bearer ${token}` } });
+  const res = await footballApi.get(`/member/leaderboard?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
   return res.data;
 }
 
 export async function getMemberTopFiveBallers(token) {
-  const res = await footballApi.get('/member/top-five-ballers', { headers: { Authorization: `Bearer ${token}` } });
+  const res = await footballApi.get(`/member/top-five-ballers?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token) });
   return res.data;
 }
