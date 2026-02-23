@@ -107,12 +107,15 @@ function PlayerModal({ player, onClose }) {
   );
 }
 
+const PAGE_SIZE = 10;
+
 export default function Leaderboard() {
   const { token, player } = getPlayerAuth();
   const toast = useToast();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [selectedPlayer, setSelectedPlayer] = useState(null);
+  const [page, setPage] = useState(0);
 
   useEffect(() => {
     if (!token) return;
@@ -134,12 +137,25 @@ export default function Leaderboard() {
   const topPresent = data?.top_present || [];
   const topCleanSheets = data?.top_clean_sheets || [];
 
+  const totalPages = Math.ceil(leaderboard.length / PAGE_SIZE);
+  const visibleRows = leaderboard.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const myRank = leaderboard.findIndex((r) => r.player_id === player?.id);
+  const myPage = myRank >= 0 ? Math.floor(myRank / PAGE_SIZE) : -1;
+
   return (
     <>
       <PlayerModal player={selectedPlayer} onClose={() => setSelectedPlayer(null)} />
 
       <header className="min-h-14 md:h-20 border-b border-primary/10 px-4 md:px-8 flex items-center justify-between sticky top-0 bg-background-light/80 dark:bg-background-dark/80 backdrop-blur-md z-10 safe-area-inset-top">
         <h2 className="text-lg md:text-xl font-bold truncate">Global rating table</h2>
+        {!loading && myRank >= 0 && myPage !== page && (
+          <button
+            onClick={() => setPage(myPage)}
+            className="text-xs text-primary underline underline-offset-2 shrink-0 ml-2"
+          >
+            My rank #{myRank + 1}
+          </button>
+        )}
       </header>
 
       <div className="p-4 md:p-8 max-w-5xl mx-auto w-full space-y-6 md:space-y-8 pb-safe">
@@ -163,14 +179,14 @@ export default function Leaderboard() {
             <tbody>
               {loading
                 ? Array.from({ length: 8 }, (_, i) => <LeaderboardRowSkeleton key={i} />)
-                : leaderboard.map((row, i) => (
+                : visibleRows.map((row, i) => (
                   <tr
                     key={row.player_id}
                     onClick={() => setSelectedPlayer(row)}
                     className={`border-b border-slate-700/50 cursor-pointer transition-colors
                       ${row.player_id === player.id ? 'bg-primary/10' : 'hover:bg-primary/5'}`}
                   >
-                    <td className="py-2 px-1.5 md:px-2 font-bold text-slate-500">{i + 1}</td>
+                    <td className="py-2 px-1.5 md:px-2 font-bold text-slate-500">{page * PAGE_SIZE + i + 1}</td>
                     <td className="py-2 px-1.5 md:px-2 font-medium min-w-[72px]">{row.baller_name}</td>
                     <td className="py-2 px-1.5 md:px-2 text-center"><StarDisplay count={row.star_rating} /></td>
                     <td className="py-2 px-1.5 md:px-2 text-center font-bold text-primary">{row.average_rating}</td>
@@ -187,6 +203,28 @@ export default function Leaderboard() {
           </table>
         </div>
         {!loading && leaderboard.length === 0 && <p className="text-slate-500 text-center py-8">No ratings yet. Play matchdays to appear on the table.</p>}
+        {!loading && totalPages > 1 && (
+          <div className="flex items-center justify-between pt-2">
+            <button
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-slate-800 border border-slate-700 disabled:opacity-30 hover:bg-slate-700 transition-colors"
+            >
+              <span className="material-symbols-outlined text-base">chevron_left</span> Prev
+            </button>
+            <span className="text-xs text-slate-400">
+              {page + 1} / {totalPages}
+              {myRank >= 0 && <span className="ml-2 text-primary font-semibold">Your rank #{myRank + 1}</span>}
+            </span>
+            <button
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={page >= totalPages - 1}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm font-semibold bg-slate-800 border border-slate-700 disabled:opacity-30 hover:bg-slate-700 transition-colors"
+            >
+              Next <span className="material-symbols-outlined text-base">chevron_right</span>
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4 pt-4">
           <TopTable title="Top goals overall" list={topGoals} metricKey="goals" metricLabel="Goals" playerId={player.id} onPlayerClick={setSelectedPlayer} />

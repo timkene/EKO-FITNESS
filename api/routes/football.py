@@ -1894,10 +1894,10 @@ def member_leaderboard(payload: dict = Depends(require_player)):
             stars[pid] = 1
     for row in out:
         row["star_rating"] = stars.get(row["player_id"], 0)
-    top_goals = sorted(out, key=lambda x: (-x["goals"], -x["assists"], -x["average_rating"]))[:20]
-    top_assists = sorted(out, key=lambda x: (-x["assists"], -x["goals"], -x["average_rating"]))[:20]
-    top_present = sorted(out, key=lambda x: (-x["matchdays_present"], -x["average_rating"]))[:20]
-    top_clean_sheets = sorted(out, key=lambda x: (-x["clean_sheets"], -x["average_rating"]))[:20]
+    top_goals = sorted(out, key=lambda x: (-x["goals"], -x["assists"], -x["average_rating"]))[:5]
+    top_assists = sorted(out, key=lambda x: (-x["assists"], -x["goals"], -x["average_rating"]))[:5]
+    top_present = sorted(out, key=lambda x: (-x["matchdays_present"], -x["average_rating"]))[:5]
+    top_clean_sheets = sorted(out, key=lambda x: (-x["clean_sheets"], -x["average_rating"]))[:5]
     result = {
         "success": True, "leaderboard": out,
         "top_goals": top_goals, "top_assists": top_assists, "top_present": top_present, "top_clean_sheets": top_clean_sheets,
@@ -1906,12 +1906,23 @@ def member_leaderboard(payload: dict = Depends(require_player)):
     return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
 
 
-@router.get("/member/top-five-ballers")
-def member_top_five_ballers(payload: dict = Depends(require_player)):
-    """Top 5 players by average rating for dashboard spotlight. Uses request-scoped cache for speed."""
-    cached = _sc_get("top_five")
+@router.get("/member/top-three-ballers")
+def member_top_three_ballers(payload: dict = Depends(require_player)):
+    """Top 3 players by average rating for dashboard spotlight. Reuses leaderboard cache when available."""
+    cached = _sc_get("top_three")
     if cached is not None:
         return JSONResponse(content=cached, headers=NO_CACHE_HEADERS)
+    # Reuse the leaderboard cache if it exists — avoids a redundant full player scan
+    lb_cached = _sc_get("leaderboard")
+    if lb_cached is not None:
+        top_three = [
+            {k: r[k] for k in ("player_id", "baller_name", "jersey_number", "average_rating", "goals", "assists", "matchdays_present")}
+            for r in lb_cached["leaderboard"] if r["average_rating"] > 0
+        ][:3]
+        result = {"success": True, "top_three": top_three}
+        _sc_set("top_three", result)
+        return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
+    # Full scan fallback (when leaderboard hasn't been loaded yet)
     conn = get_conn()
     cache = {}
     all_players = conn.execute("SELECT id, baller_name, jersey_number FROM FOOTBALL.players WHERE status = 'approved' AND id > 0").fetchall()
@@ -1925,8 +1936,8 @@ def member_top_five_ballers(payload: dict = Depends(require_player)):
             "average_rating": s["average_rating"], "goals": s["goals"], "assists": s["assists"], "matchdays_present": s["matchdays_present"],
         })
     out.sort(key=lambda x: (-x["average_rating"], -x["goals"], -x["assists"]))
-    result = {"success": True, "top_five": out[:5]}
-    _sc_set("top_five", result)
+    result = {"success": True, "top_three": out[:3]}
+    _sc_set("top_three", result)
     return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
 
 

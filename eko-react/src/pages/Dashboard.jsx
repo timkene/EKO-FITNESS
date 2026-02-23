@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getPlayerAuth } from './Login';
-import { getMemberDues, submitPaymentEvidence, applyWaiver, listMemberMatchdays, getMemberMatchday, voteMatchday, getMemberStats, getMemberTopFiveBallers } from '../api';
+import { getMemberDues, submitPaymentEvidence, applyWaiver, listMemberMatchdays, getMemberMatchday, voteMatchday, getMemberStats, getMemberTopThreeBallers } from '../api';
 import JerseyAvatar from '../components/JerseyAvatar';
 import { useToast } from '../components/Toast';
 import { StatCardSkeleton, TopFiveSkeleton } from '../components/Skeleton';
@@ -45,20 +45,20 @@ export default function Dashboard() {
   const [voting, setVoting] = useState(false);
   const [memberStats, setMemberStats] = useState(null);
   const [statsLoading, setStatsLoading] = useState(true);
-  const [topFiveBallers, setTopFiveBallers] = useState([]);
-  const [topFiveLoading, setTopFiveLoading] = useState(true);
+  const [topThreeBallers, setTopThreeBallers] = useState([]);
+  const [topThreeLoading, setTopThreeLoading] = useState(true);
   const fileInputRef = useRef(null);
 
   useEffect(() => {
     if (!token) return;
     setStatsLoading(true);
-    setTopFiveLoading(true);
+    setTopThreeLoading(true);
     // Fetch both in parallel — they share the same backend cache so the second is near-instant
-    Promise.allSettled([getMemberStats(token), getMemberTopFiveBallers(token)]).then(([statsRes, topRes]) => {
+    Promise.allSettled([getMemberStats(token), getMemberTopThreeBallers(token)]).then(([statsRes, topRes]) => {
       setMemberStats(statsRes.status === 'fulfilled' ? statsRes.value : null);
       setStatsLoading(false);
-      setTopFiveBallers(topRes.status === 'fulfilled' ? topRes.value?.top_five || [] : []);
-      setTopFiveLoading(false);
+      setTopThreeBallers(topRes.status === 'fulfilled' ? topRes.value?.top_three || [] : []);
+      setTopThreeLoading(false);
     });
   }, [token]);
 
@@ -163,13 +163,13 @@ export default function Dashboard() {
         {/* EKO TOP 5 BALLERS — in their faces, mobile-friendly */}
         <div className="bg-gradient-to-br from-amber-500/20 via-primary/10 to-slate-900/60 border-2 border-amber-500/30 rounded-xl md:rounded-2xl p-4 md:p-8 shadow-lg">
           <h2 className="text-lg md:text-2xl font-black text-center mb-1 md:mb-2 uppercase tracking-wider text-amber-400">
-            EKO TOP 5 BALLERS
+            EKO TOP 3 BALLERS
           </h2>
-          <p className="text-slate-400 text-xs md:text-sm text-center mb-4 md:mb-6">Top 5 by rating — play to get here</p>
-          {topFiveLoading && <TopFiveSkeleton />}
-          {!topFiveLoading && topFiveBallers.length > 0 ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3 md:gap-6">
-              {topFiveBallers.map((b, i) => (
+          <p className="text-slate-400 text-xs md:text-sm text-center mb-4 md:mb-6">Top 3 by rating — play to get here</p>
+          {topThreeLoading && <TopFiveSkeleton />}
+          {!topThreeLoading && topThreeBallers.length > 0 ? (
+            <div className="grid grid-cols-3 gap-3 md:gap-6 max-w-lg mx-auto">
+              {topThreeBallers.map((b, i) => (
                 <div key={b.player_id} className="flex flex-col items-center text-center min-w-0">
                   <div className="relative flex justify-center">
                     <JerseyAvatar shortName={b.baller_name} number={b.jersey_number} size="lg" className="mx-auto shrink-0" />
@@ -185,8 +185,8 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
-          ) : !topFiveLoading ? (
-            <p className="text-slate-400 text-center py-4 md:py-6 text-sm md:text-base px-2">Complete at least one matchday to see the EKO TOP 5 BALLERS.</p>
+          ) : !topThreeLoading ? (
+            <p className="text-slate-400 text-center py-4 md:py-6 text-sm md:text-base px-2">Complete at least one matchday to see the EKO TOP 3 BALLERS.</p>
           ) : null}
         </div>
 

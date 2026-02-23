@@ -437,11 +437,11 @@ export async function getMemberLeaderboard(token) {
   return res.data;
 }
 
-export async function getMemberTopFiveBallers(token) {
-  const cacheKey = `topfive:${token}`;
+export async function getMemberTopThreeBallers(token) {
+  const cacheKey = `topthree:${token}`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
-  const res = await footballApi.get(`/member/top-five-ballers?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
+  const res = await footballApi.get(`/member/top-three-ballers?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
   cacheSet(cacheKey, res.data);
   return res.data;
 }
