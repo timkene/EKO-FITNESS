@@ -461,6 +461,7 @@ def admin_approve(player_id: int, payload: dict = Depends(require_admin)):
         conn.execute("""
             UPDATE FOOTBALL.players SET status = 'approved', password_hash = ?, password_display = ?, year_registered = ?, approved_at = current_timestamp WHERE id = ?
         """, [password_hash, password, year, player_id])
+        _sc_clear()  # new approved player now appears on leaderboard
 
         # Approval is already saved. Send email (never raises).
         email_sent, email_err = send_credentials_email(email, baller_name, password)
@@ -482,6 +483,7 @@ def admin_reject(player_id: int, payload: dict = Depends(require_admin)):
     check = conn.execute("SELECT id FROM FOOTBALL.players WHERE id = ? AND status = 'rejected'", [player_id]).fetchone()
     if not check:
         raise HTTPException(status_code=404, detail="Player not found or not pending.")
+    _sc_clear()
     return {"success": True, "message": "Registration rejected."}
 
 
@@ -600,6 +602,7 @@ def admin_suspend(player_id: int, payload: dict = Depends(require_admin)):
     conn.execute("UPDATE FOOTBALL.players SET suspended = true WHERE id = ? AND status = 'approved'", [player_id])
     if conn.execute("SELECT id FROM FOOTBALL.players WHERE id = ? AND suspended = true", [player_id]).fetchone() is None:
         raise HTTPException(status_code=404, detail="Player not found or not approved.")
+    _sc_clear()
     return {"success": True, "message": "Member suspended."}
 
 
@@ -607,6 +610,7 @@ def admin_suspend(player_id: int, payload: dict = Depends(require_admin)):
 def admin_activate(player_id: int, payload: dict = Depends(require_admin)):
     conn = get_conn()
     conn.execute("UPDATE FOOTBALL.players SET suspended = false WHERE id = ?", [player_id])
+    _sc_clear()
     return {"success": True, "message": "Member activated."}
 
 
@@ -1657,6 +1661,7 @@ def admin_matchday_set_attendance(matchday_id: int, body: SetAttendanceBody, pay
         "INSERT INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, ?)",
         [matchday_id, body.player_id, bool(body.present)],
     )
+    _sc_clear()
     return {"success": True, "message": "Attendance updated."}
 
 
@@ -1689,6 +1694,7 @@ def admin_matchday_set_attendance_bulk(matchday_id: int, body: BulkAttendanceBod
                     [matchday_id, u.player_id, bool(u.present)],
                 )
                 count += 1
+        _sc_clear()
         return {"success": True, "message": f"Attendance updated for {count} player(s)."}
     except HTTPException:
         raise
@@ -1797,6 +1803,7 @@ def admin_matchday_add_card(matchday_id: int, body: AddCardBody, payload: dict =
             "INSERT OR REPLACE INTO FOOTBALL.matchday_cards (matchday_id, player_id, yellow_count, red_count) VALUES (?, ?, ?, ?)",
             [matchday_id, body.player_id, y, r],
         )
+        _sc_clear()
         return {"success": True, "message": f"Card added. Yellows: {y}, Reds: {r}."}
     return {"success": True, "message": "Card added (Others – no rating impact)."}
 
@@ -2091,6 +2098,7 @@ def admin_add_goal(matchday_id: int, fixture_id: int, body: AddGoalBody, payload
         conn.execute("UPDATE FOOTBALL.matchday_fixtures SET home_goals = home_goals + 1 WHERE id = ?", [fixture_id])
     else:
         conn.execute("UPDATE FOOTBALL.matchday_fixtures SET away_goals = away_goals + 1 WHERE id = ?", [fixture_id])
+    _sc_clear()
     return {"success": True, "message": "Goal added."}
 
 
@@ -2133,6 +2141,7 @@ def admin_remove_goal(matchday_id: int, fixture_id: int, goal_id: int, payload: 
         conn.execute("UPDATE FOOTBALL.matchday_fixtures SET home_goals = GREATEST(0, home_goals - 1) WHERE id = ?", [fixture_id])
     else:
         conn.execute("UPDATE FOOTBALL.matchday_fixtures SET away_goals = GREATEST(0, away_goals - 1) WHERE id = ?", [fixture_id])
+    _sc_clear()
     return {"success": True, "message": "Goal removed (assist removed with it)."}
 
 
@@ -2162,6 +2171,7 @@ def admin_end_fixture(matchday_id: int, fixture_id: int, payload: dict = Depends
     if row[1] != "in_progress":
         raise HTTPException(status_code=400, detail="Fixture not in progress.")
     conn.execute("UPDATE FOOTBALL.matchday_fixtures SET status = 'completed', ended_at = current_timestamp WHERE id = ?", [fixture_id])
+    _sc_clear()
     return {"success": True, "message": "Fixture ended."}
 
 

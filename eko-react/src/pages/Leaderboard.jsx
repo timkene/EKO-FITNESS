@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { getPlayerAuth } from './Login';
-import { getMemberLeaderboard } from '../api';
+import { getMemberLeaderboard, invalidateStatsCache } from '../api';
 import { useToast } from '../components/Toast';
 import { LeaderboardRowSkeleton } from '../components/Skeleton';
 
@@ -116,6 +116,23 @@ export default function Leaderboard() {
   const [loading, setLoading] = useState(true);
   const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [page, setPage] = useState(0);
+
+  // Refetch when user returns to this tab — ensures data is always fresh after admin changes
+  useEffect(() => {
+    if (!token) return;
+    const refetch = () => {
+      if (document.visibilityState === 'visible') {
+        invalidateStatsCache();
+        getMemberLeaderboard(token).then(setData).catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', refetch);
+    window.addEventListener('focus', refetch);
+    return () => {
+      document.removeEventListener('visibilitychange', refetch);
+      window.removeEventListener('focus', refetch);
+    };
+  }, [token]);
 
   useEffect(() => {
     if (!token) return;

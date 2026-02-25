@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getPlayerAuth } from './Login';
-import { getMemberDues, submitPaymentEvidence, applyWaiver, listMemberMatchdays, getMemberMatchday, voteMatchday, getMemberStats, getMemberTopThreeBallers } from '../api';
+import { getMemberDues, submitPaymentEvidence, applyWaiver, listMemberMatchdays, getMemberMatchday, voteMatchday, getMemberStats, getMemberTopThreeBallers, invalidateStatsCache } from '../api';
 import JerseyAvatar from '../components/JerseyAvatar';
 import { useToast } from '../components/Toast';
 import { StatCardSkeleton, TopFiveSkeleton } from '../components/Skeleton';
@@ -60,6 +60,26 @@ export default function Dashboard() {
       setTopThreeBallers(topRes.status === 'fulfilled' ? topRes.value?.top_three || [] : []);
       setTopThreeLoading(false);
     });
+  }, [token]);
+
+  // Silently refetch stats when user returns to this tab after admin makes changes
+  useEffect(() => {
+    if (!token) return;
+    const refetch = () => {
+      if (document.visibilityState === 'visible') {
+        invalidateStatsCache();
+        Promise.allSettled([getMemberStats(token), getMemberTopThreeBallers(token)]).then(([statsRes, topRes]) => {
+          if (statsRes.status === 'fulfilled') setMemberStats(statsRes.value);
+          if (topRes.status === 'fulfilled') setTopThreeBallers(topRes.value?.top_three || []);
+        });
+      }
+    };
+    document.addEventListener('visibilitychange', refetch);
+    window.addEventListener('focus', refetch);
+    return () => {
+      document.removeEventListener('visibilitychange', refetch);
+      window.removeEventListener('focus', refetch);
+    };
   }, [token]);
 
   useEffect(() => {
