@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Outlet, NavLink, useNavigate } from 'react-router-dom';
+import { Outlet, NavLink, useNavigate, Link } from 'react-router-dom';
 import { getPlayerAuth, clearPlayerAuth } from '../pages/Login';
 import { getMemberStats } from '../api';
 import JerseyAvatar from './JerseyAvatar';
@@ -90,6 +90,10 @@ export default function MemberLayout() {
           <span className="material-symbols-outlined shrink-0">rule</span>
           <span className="text-sm">Rules</span>
         </NavLink>
+        <NavLink to="/profile" className={({ isActive }) => `${navClass} ${isActive ? navActive : ''}`} onClick={closeMenu}>
+          <span className="material-symbols-outlined shrink-0">manage_accounts</span>
+          <span className="text-sm">My Profile</span>
+        </NavLink>
       </nav>
       <div className="p-4 border-t border-primary/10 space-y-2">
         <button
@@ -102,11 +106,13 @@ export default function MemberLayout() {
           <span className="text-sm">{dark ? 'Light mode' : 'Dark mode'}</span>
         </button>
         <div className="flex items-center gap-3 p-2 rounded-xl bg-primary/5">
-          <JerseyAvatar shortName={player.baller_name || player.first_name} number={player.jersey_number} />
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-bold truncate">{player.baller_name}</p>
-            <p className="text-xs text-slate-500 truncate">{player.first_name} {player.surname}</p>
-          </div>
+          <Link to="/profile" onClick={closeMenu} className="flex items-center gap-3 flex-1 min-w-0 hover:opacity-80 transition-opacity" title="Edit profile">
+            <JerseyAvatar shortName={player.baller_name || player.first_name} number={player.jersey_number} />
+            <div className="min-w-0">
+              <p className="text-sm font-bold truncate">{player.baller_name}</p>
+              <p className="text-xs text-slate-500 truncate">{player.first_name} {player.surname}</p>
+            </div>
+          </Link>
           <button type="button" onClick={handleLogout} className="min-w-[44px] min-h-[44px] flex items-center justify-center text-slate-400 hover:text-primary touch-manipulation" aria-label="Log out">
             <span className="material-symbols-outlined text-xl">logout</span>
           </button>

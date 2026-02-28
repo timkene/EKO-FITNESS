@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import Matchday from './pages/Matchday';
 import Leaderboard from './pages/Leaderboard';
 import Rules from './pages/Rules';
+import Profile from './pages/Profile';
 import Admin from './pages/Admin';
 import { ToastProvider } from './components/Toast';
 import './App.css';
@@ -23,6 +24,7 @@ function App() {
           <Route path="/matchday" element={<Matchday />} />
           <Route path="/leaderboard" element={<Leaderboard />} />
           <Route path="/rules" element={<Rules />} />
+          <Route path="/profile" element={<Profile />} />
         </Route>
         <Route path="/admin" element={<Admin />} />
         <Route path="*" element={<Navigate to="/login" replace />} />

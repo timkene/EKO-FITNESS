@@ -1948,6 +1948,105 @@ def member_top_three_ballers(payload: dict = Depends(require_player)):
     return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
 
 
+# ---------------------------------------------------------------------------
+# Member profile — view and self-edit (baller name, shirt number, phone, password)
+# ---------------------------------------------------------------------------
+
+@router.get("/member/profile")
+def member_get_profile(payload: dict = Depends(require_player)):
+    """Return the authenticated player's full profile."""
+    conn = get_conn()
+    player_id = int(payload["sub"])
+    row = conn.execute("""
+        SELECT id, first_name, surname, baller_name, jersey_number, email, whatsapp_phone,
+               status, COALESCE(suspended, false), created_at
+        FROM FOOTBALL.players WHERE id = ?
+    """, [player_id]).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Player not found.")
+    pid, first_name, surname, baller_name, jersey_number, email, whatsapp_phone, status, suspended, created_at = row
+    return {
+        "success": True,
+        "player": {
+            "id": pid,
+            "first_name": first_name,
+            "surname": surname,
+            "baller_name": baller_name,
+            "jersey_number": jersey_number,
+            "email": email,
+            "whatsapp_phone": whatsapp_phone or "",
+            "status": status,
+            "suspended": bool(suspended),
+            "created_at": str(created_at) if created_at else None,
+        },
+    }
+
+
+class UpdateProfileRequest(BaseModel):
+    baller_name: str = Field(..., min_length=1, max_length=50)
+    jersey_number: int = Field(..., ge=1, le=100)
+    whatsapp_phone: str = Field(..., min_length=1, max_length=30)
+
+
+@router.put("/member/profile")
+def member_update_profile(body: UpdateProfileRequest, payload: dict = Depends(require_player)):
+    """Update own baller name, shirt number, and WhatsApp phone."""
+    conn = get_conn()
+    player_id = int(payload["sub"])
+    baller_name = body.baller_name.strip()
+    conflict = conn.execute(
+        "SELECT id FROM FOOTBALL.players WHERE LOWER(TRIM(baller_name)) = LOWER(TRIM(?)) AND id != ?",
+        [baller_name, player_id],
+    ).fetchone()
+    if conflict:
+        raise HTTPException(status_code=400, detail="That baller name is already taken. Choose another.")
+    jersey_conflict = conn.execute(
+        "SELECT id FROM FOOTBALL.players WHERE jersey_number = ? AND id != ? AND status = 'approved'",
+        [body.jersey_number, player_id],
+    ).fetchone()
+    if jersey_conflict:
+        raise HTTPException(status_code=400, detail="That shirt number is already taken. Choose another.")
+    conn.execute(
+        "UPDATE FOOTBALL.players SET baller_name = ?, jersey_number = ?, whatsapp_phone = ? WHERE id = ?",
+        [baller_name, body.jersey_number, body.whatsapp_phone.strip(), player_id],
+    )
+    _sc_clear()  # baller_name appears in leaderboard / top-three cache
+    return {
+        "success": True,
+        "message": "Profile updated successfully.",
+        "baller_name": baller_name,
+        "jersey_number": body.jersey_number,
+    }
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8, max_length=50)
+
+
+@router.put("/member/password")
+def member_change_password(body: ChangePasswordRequest, payload: dict = Depends(require_player)):
+    """Change own password. Requires current password verification."""
+    conn = get_conn()
+    player_id = int(payload["sub"])
+    row = conn.execute("SELECT password_hash FROM FOOTBALL.players WHERE id = ?", [player_id]).fetchone()
+    if not row or not row[0]:
+        raise HTTPException(status_code=404, detail="Player not found.")
+    if not verify_password(body.current_password, row[0]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+    if not re.match(r'^[A-Za-z0-9\-_]+$', body.new_password):
+        raise HTTPException(
+            status_code=400,
+            detail="Password may only contain letters, numbers, hyphens (-) and underscores (_). No spaces or special symbols.",
+        )
+    new_hash = hash_password(body.new_password)
+    conn.execute(
+        "UPDATE FOOTBALL.players SET password_hash = ?, password_display = ? WHERE id = ?",
+        [new_hash, body.new_password, player_id],
+    )
+    return {"success": True, "message": "Password changed. Please log in again with your new password."}
+
+
 @router.post("/admin/matchdays/{matchday_id:int}/groups/publish")
 def admin_matchday_publish_groups(matchday_id: int, payload: dict = Depends(require_admin)):
     conn = get_conn()

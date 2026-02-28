@@ -437,6 +437,25 @@ export async function getMemberLeaderboard(token) {
   return res.data;
 }
 
+// ---------------------------------------------------------------------------
+// Member profile — self-edit
+// ---------------------------------------------------------------------------
+
+export async function getMemberProfile(token) {
+  const res = await footballApi.get('/member/profile', { headers: { Authorization: `Bearer ${token}` } });
+  return res.data;
+}
+
+export async function updateMemberProfile(token, data) {
+  const res = await footballApi.put('/member/profile', data, { headers: { Authorization: `Bearer ${token}` } });
+  return res.data;
+}
+
+export async function changeMemberPassword(token, data) {
+  const res = await footballApi.put('/member/password', data, { headers: { Authorization: `Bearer ${token}` } });
+  return res.data;
+}
+
 export async function getMemberTopThreeBallers(token) {
   const cacheKey = `topthree:${token}`;
   const cached = cacheGet(cacheKey);
