@@ -1018,7 +1018,11 @@ def admin_get_matchday(matchday_id: int, payload: dict = Depends(require_admin))
         ORDER BY baller_name
     """).fetchall()
     add_vote_choices = [{"player_id": r[0], "baller_name": r[1]} for r in add_vote_rows]
-    return {"success": True, "matchday": md, "vote_count": vote_count, "voted_players": voted_players, "eligible_players": eligible_players, "add_vote_choices": add_vote_choices}
+    # Players that can be added to a group late (approved, not suspended, not already in a group)
+    in_group_ids = set(r[0] for r in conn.execute("SELECT player_id FROM FOOTBALL.matchday_group_members WHERE matchday_id = ? AND player_id > 0", [matchday_id]).fetchall())
+    available_rows = conn.execute("SELECT id, baller_name, jersey_number FROM FOOTBALL.players WHERE status = 'approved' AND COALESCE(suspended, false) = false ORDER BY baller_name").fetchall()
+    available_players = [{"player_id": r[0], "baller_name": r[1], "jersey_number": r[2]} for r in available_rows if r[0] not in in_group_ids]
+    return {"success": True, "matchday": md, "vote_count": vote_count, "voted_players": voted_players, "eligible_players": eligible_players, "add_vote_choices": add_vote_choices, "available_players": available_players}
 
 
 @router.get("/member/matchdays")
@@ -1196,7 +1200,7 @@ def member_get_matchday(matchday_id: int, payload: dict = Depends(require_player
         for gid, gidx, pid, baller, present in group_rows:
             if gid not in by_group:
                 by_group[gid] = {"group_index": gidx, "members": []}
-            by_group[gid]["members"].append({"baller_name": baller or str(pid), "present": bool(present) if present is not None else True})
+            by_group[gid]["members"].append({"baller_name": baller or str(pid), "present": bool(present) if present is not None else False})
         all_groups = list(by_group.values())
         # Add "Others" to each group for display (guests)
         for g in all_groups:
@@ -2087,6 +2091,127 @@ def admin_generate_fixtures(matchday_id: int, payload: dict = Depends(require_ad
             next_id += 1
     count = (len(group_ids) * (len(group_ids) - 1)) // 2
     return {"success": True, "message": f"Generated {count} fixtures.", "fixture_count": count}
+
+
+@router.post("/admin/matchdays/{matchday_id:int}/fixtures/add-round")
+def admin_add_fixture_round(matchday_id: int, payload: dict = Depends(require_admin)):
+    """Add another round of fixtures (home/away legs not yet scheduled). Each group pair can play both home and away."""
+    conn = get_conn()
+    md = _get_matchday_by_id(conn, matchday_id)
+    if not md:
+        raise HTTPException(status_code=404, detail="Matchday not found.")
+    if md["status"] != "approved":
+        raise HTTPException(status_code=400, detail="Matchday must be approved.")
+    groups = conn.execute("SELECT id FROM FOOTBALL.matchday_groups WHERE matchday_id = ? ORDER BY group_index", [matchday_id]).fetchall()
+    group_ids = [r[0] for r in groups]
+    if len(group_ids) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 groups.")
+    existing_pairs = set(
+        (r[0], r[1]) for r in conn.execute("SELECT group_a_id, group_b_id FROM FOOTBALL.matchday_fixtures WHERE matchday_id = ?", [matchday_id]).fetchall()
+    )
+    # All ordered pairs (A home vs B away, and B home vs A away)
+    all_ordered = [(a, b) for a in group_ids for b in group_ids if a != b]
+    new_pairs = [(a, b) for (a, b) in all_ordered if (a, b) not in existing_pairs]
+    if not new_pairs:
+        raise HTTPException(status_code=400, detail="All home/away fixture combinations already exist. No new fixtures to add.")
+    next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.matchday_fixtures").fetchone()[0]
+    for a, b in new_pairs:
+        conn.execute("""
+            INSERT INTO FOOTBALL.matchday_fixtures (id, matchday_id, group_a_id, group_b_id, status, home_goals, away_goals)
+            VALUES (?, ?, ?, ?, 'pending', 0, 0)
+        """, [next_id, matchday_id, a, b])
+        next_id += 1
+    return {"success": True, "message": f"Added {len(new_pairs)} new fixture(s) for the next round.", "added": len(new_pairs)}
+
+
+class SwapFixturesBody(BaseModel):
+    fixture_id_a: int
+    fixture_id_b: int
+
+
+@router.put("/admin/matchdays/{matchday_id:int}/fixtures/swap")
+def admin_swap_fixtures(matchday_id: int, body: SwapFixturesBody, payload: dict = Depends(require_admin)):
+    """Swap the team assignment of two pending fixtures to reorder the schedule."""
+    conn = get_conn()
+    fa = conn.execute("SELECT id, group_a_id, group_b_id, status FROM FOOTBALL.matchday_fixtures WHERE id = ? AND matchday_id = ?", [body.fixture_id_a, matchday_id]).fetchone()
+    fb = conn.execute("SELECT id, group_a_id, group_b_id, status FROM FOOTBALL.matchday_fixtures WHERE id = ? AND matchday_id = ?", [body.fixture_id_b, matchday_id]).fetchone()
+    if not fa or not fb:
+        raise HTTPException(status_code=404, detail="One or both fixtures not found in this matchday.")
+    if fa[3] != "pending" or fb[3] != "pending":
+        raise HTTPException(status_code=400, detail="Both fixtures must be pending to swap.")
+    conn.execute("UPDATE FOOTBALL.matchday_fixtures SET group_a_id = ?, group_b_id = ? WHERE id = ?", [fb[1], fb[2], fa[0]])
+    conn.execute("UPDATE FOOTBALL.matchday_fixtures SET group_a_id = ?, group_b_id = ? WHERE id = ?", [fa[1], fa[2], fb[0]])
+    return {"success": True, "message": "Fixtures swapped."}
+
+
+@router.post("/admin/matchdays/{matchday_id:int}/fixtures/reshuffle")
+def admin_reshuffle_fixtures(matchday_id: int, payload: dict = Depends(require_admin)):
+    """Reshuffle pending fixtures so no group plays in consecutive slots (greedy algorithm)."""
+    conn = get_conn()
+    md = _get_matchday_by_id(conn, matchday_id)
+    if not md:
+        raise HTTPException(status_code=404, detail="Matchday not found.")
+    pending = conn.execute(
+        "SELECT id, group_a_id, group_b_id FROM FOOTBALL.matchday_fixtures WHERE matchday_id = ? AND status = 'pending' ORDER BY id",
+        [matchday_id],
+    ).fetchall()
+    if len(pending) < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 pending fixtures to reshuffle.")
+    # Greedy: pick next fixture whose groups don't overlap with last scheduled
+    remaining = list(pending)
+    scheduled_groups = []  # list of (group_a_id, group_b_id) in optimal order
+    last_groups: set = set()
+    while remaining:
+        placed = False
+        for i, (fid, ga, gb) in enumerate(remaining):
+            if ga not in last_groups and gb not in last_groups:
+                scheduled_groups.append((ga, gb))
+                last_groups = {ga, gb}
+                remaining.pop(i)
+                placed = True
+                break
+        if not placed:
+            fid, ga, gb = remaining.pop(0)
+            scheduled_groups.append((ga, gb))
+            last_groups = {ga, gb}
+    # Write the new ordering back: fixture slot i gets the groups from scheduled_groups[i]
+    for (fid, _, _), (new_ga, new_gb) in zip(pending, scheduled_groups):
+        conn.execute("UPDATE FOOTBALL.matchday_fixtures SET group_a_id = ?, group_b_id = ? WHERE id = ?", [new_ga, new_gb, fid])
+    return {"success": True, "message": f"Reshuffled {len(pending)} pending fixtures to reduce consecutive matches."}
+
+
+class AddLateMemberBody(BaseModel):
+    player_id: int
+    group_id: int
+
+
+@router.post("/admin/matchdays/{matchday_id:int}/groups/add-late-member")
+def admin_add_late_member(matchday_id: int, body: AddLateMemberBody, payload: dict = Depends(require_admin)):
+    """Add an approved player to a specific group after groups are already published. The player is added absent by default."""
+    conn = get_conn()
+    md = _get_matchday_by_id(conn, matchday_id)
+    if not md:
+        raise HTTPException(status_code=404, detail="Matchday not found.")
+    if not md.get("groups_published"):
+        raise HTTPException(status_code=400, detail="Groups must be published before adding late members.")
+    player_row = conn.execute("SELECT id, baller_name FROM FOOTBALL.players WHERE id = ? AND status = 'approved' AND COALESCE(suspended, false) = false", [body.player_id]).fetchone()
+    if not player_row:
+        raise HTTPException(status_code=404, detail="Approved, active player not found.")
+    group_row = conn.execute("SELECT id, group_index FROM FOOTBALL.matchday_groups WHERE id = ? AND matchday_id = ?", [body.group_id, matchday_id]).fetchone()
+    if not group_row:
+        raise HTTPException(status_code=404, detail="Group not found in this matchday.")
+    already = conn.execute("SELECT group_id FROM FOOTBALL.matchday_group_members WHERE matchday_id = ? AND player_id = ?", [matchday_id, body.player_id]).fetchone()
+    if already:
+        raise HTTPException(status_code=400, detail="Player is already in a group for this matchday.")
+    conn.execute("INSERT INTO FOOTBALL.matchday_group_members (matchday_id, player_id, group_id) VALUES (?, ?, ?)", [matchday_id, body.player_id, body.group_id])
+    # Add vote so they count as a participant
+    if not conn.execute("SELECT id FROM FOOTBALL.matchday_votes WHERE matchday_id = ? AND player_id = ?", [matchday_id, body.player_id]).fetchone():
+        next_vote_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.matchday_votes").fetchone()[0]
+        conn.execute("INSERT INTO FOOTBALL.matchday_votes (id, matchday_id, player_id) VALUES (?, ?, ?)", [next_vote_id, matchday_id, body.player_id])
+    # Mark absent by default — admin must explicitly mark present
+    if not conn.execute("SELECT player_id FROM FOOTBALL.matchday_attendance WHERE matchday_id = ? AND player_id = ?", [matchday_id, body.player_id]).fetchone():
+        conn.execute("INSERT INTO FOOTBALL.matchday_attendance (matchday_id, player_id, present) VALUES (?, ?, false)", [matchday_id, body.player_id])
+    return {"success": True, "message": f"{player_row[1]} added to Group {group_row[1]}. Mark them present in attendance when they arrive."}
 
 
 @router.get("/admin/matchdays/{matchday_id:int}/fixtures")

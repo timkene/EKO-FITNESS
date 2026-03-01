@@ -42,10 +42,6 @@ import {
   generateFixtures,
   getFixtures,
   publishFixtures,
-  addFixtureRound,
-  swapFixtures,
-  reshuffleFixtures,
-  addLateMember,
   startFixture,
   addGoal,
   removeGoal,
@@ -115,15 +111,14 @@ export default function Admin() {
   const [addGoalAssister, setAddGoalAssister] = useState('');
   const [pendingMoves, setPendingMoves] = useState([]);
   const [attendanceSummary, setAttendanceSummary] = useState({ present: [], absent: [] });
+  const [selectedPresentIds, setSelectedPresentIds] = useState([]);
+  const [selectedAbsentIds, setSelectedAbsentIds] = useState([]);
   const [groupsSectionOpen, setGroupsSectionOpen] = useState(false);
   const [addCardFixtureId, setAddCardFixtureId] = useState(null);
   const [addCardType, setAddCardType] = useState(null);
   const [addCardPlayerId, setAddCardPlayerId] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [toastDismissAt, setToastDismissAt] = useState(null);
-  const [swapFixtureA, setSwapFixtureA] = useState(null);
-  const [lateMemberPlayerId, setLateMemberPlayerId] = useState('');
-  const [lateMemberGroupId, setLateMemberGroupId] = useState('');
 
   const fetchPending = async () => {
     const token = getAdminToken();
@@ -191,30 +186,38 @@ export default function Admin() {
       const data = await listAdminMatchdays(token);
       setMatchdaysList(data.matchdays || []);
       if (selectedMatchdayId) {
-        // Run all independent requests in parallel — cuts wait time from ~9 sequential to ~1 round-trip
-        const [detailRes, groupsRes, attRes, attSumRes, cardsRes, fixRes, tableRes, ratingsRes] = await Promise.allSettled([
-          getAdminMatchday(selectedMatchdayId, token),
-          getAdminMatchdayGroups(selectedMatchdayId, token),
-          getMatchdayAttendance(selectedMatchdayId, token),
-          getMatchdayAttendanceSummary(selectedMatchdayId, token),
-          getMatchdayCards(selectedMatchdayId, token),
-          getFixtures(selectedMatchdayId, token),
-          getMatchdayTable(selectedMatchdayId, token),
-          getMatchdayPlayerRatings(selectedMatchdayId, token),
-        ]);
-        const detail = detailRes.status === 'fulfilled' ? detailRes.value : null;
+        const detail = await getAdminMatchday(selectedMatchdayId, token);
         setMatchdayData(detail);
-        setMatchdayGroups(groupsRes.status === 'fulfilled' ? groupsRes.value : null);
-        setMatchdayAttendance(attRes.status === 'fulfilled' ? attRes.value.attendance || [] : []);
-        if (detail?.matchday?.groups_published && attSumRes.status === 'fulfilled') {
-          setAttendanceSummary({ present: attSumRes.value.present || [], absent: attSumRes.value.absent || [] });
+        const groupsData = await getAdminMatchdayGroups(selectedMatchdayId, token);
+        setMatchdayGroups(groupsData);
+        try {
+          const attData = await getMatchdayAttendance(selectedMatchdayId, token);
+          setMatchdayAttendance(attData.attendance || []);
+        } catch { setMatchdayAttendance([]); }
+        if (detail.matchday?.groups_published) {
+          try {
+            const sum = await getMatchdayAttendanceSummary(selectedMatchdayId, token);
+            setAttendanceSummary({ present: sum.present || [], absent: sum.absent || [] });
+          } catch { setAttendanceSummary({ present: [], absent: [] }); }
         } else {
           setAttendanceSummary({ present: [], absent: [] });
         }
-        setMatchdayCards(cardsRes.status === 'fulfilled' ? cardsRes.value.cards || [] : []);
-        setMatchdayFixtures(fixRes.status === 'fulfilled' ? fixRes.value.fixtures || [] : []);
-        setMatchdayTable(tableRes.status === 'fulfilled' ? tableRes.value.table || [] : []);
-        setMatchdayPlayerRatings(ratingsRes.status === 'fulfilled' ? ratingsRes.value.ratings || [] : []);
+        try {
+          const cardsData = await getMatchdayCards(selectedMatchdayId, token);
+          setMatchdayCards(cardsData.cards || []);
+        } catch { setMatchdayCards([]); }
+        try {
+          const fixData = await getFixtures(selectedMatchdayId, token);
+          setMatchdayFixtures(fixData.fixtures || []);
+        } catch { setMatchdayFixtures([]); }
+        try {
+          const tableData = await getMatchdayTable(selectedMatchdayId, token);
+          setMatchdayTable(tableData.table || []);
+        } catch { setMatchdayTable([]); }
+        try {
+          const ratingsData = await getMatchdayPlayerRatings(selectedMatchdayId, token);
+          setMatchdayPlayerRatings(ratingsData.ratings || []);
+        } catch { setMatchdayPlayerRatings([]); }
       } else {
         setMatchdayData(null);
         setMatchdayGroups(null);
@@ -231,23 +234,6 @@ export default function Admin() {
     } finally {
       setLoadingList(false);
     }
-  };
-
-  // Lightweight refresh after goal/card actions — only re-fetches what changed (fixtures, table, ratings, cards)
-  // instead of the full 9-request fetchMatchdays, cutting post-action wait from ~60s to ~3s.
-  const refreshFixtures = async (matchdayId) => {
-    const token = getAdminToken();
-    if (!token || !matchdayId) return;
-    const [fixRes, tableRes, ratingsRes, cardsRes] = await Promise.allSettled([
-      getFixtures(matchdayId, token),
-      getMatchdayTable(matchdayId, token),
-      getMatchdayPlayerRatings(matchdayId, token),
-      getMatchdayCards(matchdayId, token),
-    ]);
-    if (fixRes.status === 'fulfilled') setMatchdayFixtures(fixRes.value.fixtures || []);
-    if (tableRes.status === 'fulfilled') setMatchdayTable(tableRes.value.table || []);
-    if (ratingsRes.status === 'fulfilled') setMatchdayPlayerRatings(ratingsRes.value.ratings || []);
-    if (cardsRes.status === 'fulfilled') setMatchdayCards(cardsRes.value.cards || []);
   };
 
   useEffect(() => {
@@ -569,17 +555,7 @@ export default function Admin() {
       if (w) w.focus();
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch (err) {
-      let message = 'Could not open file.';
-      if (err.response?.data instanceof Blob) {
-        try {
-          const text = await err.response.data.text();
-          const obj = JSON.parse(text);
-          if (obj.detail) message = obj.detail;
-        } catch (_) {}
-      } else if (err.response?.data?.detail) {
-        message = err.response.data.detail;
-      }
-      showToast(message);
+      showToast(err.response?.data?.detail || 'Could not open file.');
     }
   };
 
@@ -733,19 +709,6 @@ export default function Admin() {
         <div className="p-4 md:p-8 max-w-6xl mx-auto w-full space-y-6 overflow-x-hidden">
         {tab === 'pending' && (
           <>
-            <div className="flex justify-end mb-2">
-              <button
-                type="button"
-                onClick={() => {
-                  const link = `${window.location.origin}/signup`;
-                  navigator.clipboard.writeText(link).then(() => showToast('Signup link copied!'));
-                }}
-                className="flex items-center gap-2 py-2 px-4 bg-slate-700 text-slate-200 font-semibold rounded-lg hover:bg-slate-600 text-sm transition-colors"
-              >
-                <span className="material-symbols-outlined text-base">link</span>
-                Copy signup link
-              </button>
-            </div>
             {loadingList ? (
               <p className="text-slate-400">Loading...</p>
             ) : pending.length === 0 ? (
@@ -1036,22 +999,6 @@ export default function Admin() {
                               </div>
                             ))}
                           </div>
-                          {matchdayData?.available_players?.length > 0 && (
-                            <div className="mt-4 pt-4 border-t border-slate-700/50">
-                              <h5 className="font-semibold text-sm text-slate-300 mb-3">Add late member to group</h5>
-                              <div className="flex flex-wrap gap-2 items-center">
-                                <select value={lateMemberPlayerId} onChange={(e) => setLateMemberPlayerId(e.target.value)} className="rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-slate-100 text-sm">
-                                  <option value="">Select player...</option>
-                                  {matchdayData.available_players.map((p) => <option key={p.player_id} value={p.player_id}>{p.baller_name} #{p.jersey_number}</option>)}
-                                </select>
-                                <select value={lateMemberGroupId} onChange={(e) => setLateMemberGroupId(e.target.value)} className="rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-slate-100 text-sm">
-                                  <option value="">Select group...</option>
-                                  {matchdayGroups.groups.map((g) => <option key={g.group_id} value={g.group_id}>Group {g.group_index}</option>)}
-                                </select>
-                                <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg text-sm" onClick={async () => { if (!lateMemberPlayerId || !lateMemberGroupId) { showToast('Select both a player and a group.'); return; } showToast(''); try { await addLateMember(selectedMatchdayId, Number(lateMemberGroupId), Number(lateMemberPlayerId), getAdminToken()); setLateMemberPlayerId(''); setLateMemberGroupId(''); showToast('Member added to group.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Add to group</button>
-                              </div>
-                            </div>
-                          )}
                         </div>
                       </details>
                     ) : (
@@ -1091,57 +1038,40 @@ export default function Admin() {
 
                 {matchdayData.matchday?.status === 'approved' && matchdayData.matchday?.groups_published && (
                   <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6">
-                    <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-                      <h4 className="font-bold">Attendance</h4>
-                      <div className="flex items-center gap-3 text-xs text-slate-400">
-                        <span className="text-primary font-bold">{attendanceSummary.present.length} present</span>
-                        <span>·</span>
-                        <span>{attendanceSummary.absent.length} absent</span>
-                      </div>
-                    </div>
-                    <p className="text-slate-500 text-xs mb-4">Tap the toggle next to each player to mark them present or absent. Only present players can score/assist.</p>
+                    <h4 className="font-bold mb-2">Attendance</h4>
+                    <p className="text-slate-400 text-sm mb-2">Mark who was present. Start with everyone in Absent; select players and click &quot;Move selected → Present&quot;. Use &quot;Select all&quot; or Ctrl/Cmd+Click to select multiple.</p>
+                    <p className="text-slate-500 text-xs mb-4">Only present players can be scorer/assister (except &quot;Others&quot;).</p>
                     {(attendanceSummary.present.length === 0 && attendanceSummary.absent.length === 0) ? (
-                      <p className="text-amber-400 text-sm">No players in groups yet. Publish groups first, then refresh.</p>
+                      <p className="text-amber-400 text-sm">No players in groups yet. Add members to groups and publish, or refresh after publishing.</p>
                     ) : (
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-80 overflow-y-auto custom-scrollbar pr-1">
-                        {[...attendanceSummary.present.map((p) => ({ ...p, present: true })), ...attendanceSummary.absent.map((p) => ({ ...p, present: false }))]
-                          .sort((a, b) => a.baller_name.localeCompare(b.baller_name))
-                          .map((p) => (
-                            <label
-                              key={p.player_id}
-                              className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg bg-slate-800/50 border border-slate-700 hover:border-primary/30 cursor-pointer transition-colors select-none"
-                            >
-                              <span className={`text-sm font-medium ${p.present ? 'text-slate-100' : 'text-slate-400'}`}>{p.baller_name}</span>
-                              <button
-                                type="button"
-                                role="switch"
-                                aria-checked={p.present}
-                                onClick={async () => {
-                                  const token = getAdminToken();
-                                  if (!token) return;
-                                  try {
-                                    await setMatchdayAttendanceBulk(selectedMatchdayId, [{ player_id: p.player_id, present: !p.present }], token);
-                                    // optimistic update
-                                    setAttendanceSummary((prev) => {
-                                      if (!p.present) {
-                                        return { present: [...prev.present, { player_id: p.player_id, baller_name: p.baller_name }], absent: prev.absent.filter((x) => x.player_id !== p.player_id) };
-                                      } else {
-                                        return { absent: [...prev.absent, { player_id: p.player_id, baller_name: p.baller_name }], present: prev.present.filter((x) => x.player_id !== p.player_id) };
-                                      }
-                                    });
-                                  } catch (e) { showToast(e.response?.data?.detail || 'Failed'); }
-                                }}
-                                className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none ${p.present ? 'bg-primary' : 'bg-slate-600'}`}
-                              >
-                                <span className={`inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform ${p.present ? 'translate-x-5' : 'translate-x-0'}`} />
-                              </button>
-                            </label>
-                          ))}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-slate-300 mb-1">Present ({attendanceSummary.present.length})</label>
+                          <select multiple className="w-full rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-slate-100 text-sm min-h-[140px]" value={selectedPresentIds.map(String)} onChange={(e) => setSelectedPresentIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}>
+                            {attendanceSummary.present.map((p) => <option key={p.player_id} value={p.player_id}>{p.baller_name}</option>)}
+                          </select>
+                          <div className="mt-1 flex flex-wrap gap-2 items-center">
+                            <button type="button" className="text-slate-400 hover:text-slate-200 text-xs" onClick={() => setSelectedPresentIds(attendanceSummary.present.map((p) => p.player_id))}>Select all</button>
+                            <span className="text-slate-500 text-xs">|</span>
+                            <button type="button" className="text-slate-400 hover:text-slate-200 text-xs" onClick={() => setSelectedPresentIds([])}>Clear</button>
+                          </div>
+                          <button type="button" className="mt-2 py-1.5 px-3 bg-slate-600 text-slate-100 rounded-lg text-sm font-semibold hover:bg-slate-500 disabled:opacity-50" disabled={selectedPresentIds.length === 0} onClick={async () => { if (selectedPresentIds.length === 0) return; try { await setMatchdayAttendanceBulk(selectedMatchdayId, selectedPresentIds.map((id) => ({ player_id: id, present: false })), getAdminToken()); setSelectedPresentIds([]); showToast('Moved to absent.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Move selected → Absent</button>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-slate-300 mb-1">Absent ({attendanceSummary.absent.length})</label>
+                          <select multiple className="w-full rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-slate-100 text-sm min-h-[140px]" value={selectedAbsentIds.map(String)} onChange={(e) => setSelectedAbsentIds(Array.from(e.target.selectedOptions, (o) => Number(o.value)))}>
+                            {attendanceSummary.absent.map((p) => <option key={p.player_id} value={p.player_id}>{p.baller_name}</option>)}
+                          </select>
+                          <div className="mt-1 flex flex-wrap gap-2 items-center">
+                            <button type="button" className="text-slate-400 hover:text-slate-200 text-xs" onClick={() => setSelectedAbsentIds(attendanceSummary.absent.map((p) => p.player_id))}>Select all</button>
+                            <span className="text-slate-500 text-xs">|</span>
+                            <button type="button" className="text-slate-400 hover:text-slate-200 text-xs" onClick={() => setSelectedAbsentIds([])}>Clear</button>
+                          </div>
+                          <button type="button" className="mt-2 py-1.5 px-3 bg-primary text-background-dark rounded-lg text-sm font-semibold hover:opacity-90 disabled:opacity-50" disabled={selectedAbsentIds.length === 0} onClick={async () => { if (selectedAbsentIds.length === 0) return; try { await setMatchdayAttendanceBulk(selectedMatchdayId, selectedAbsentIds.map((id) => ({ player_id: id, present: true })), getAdminToken()); setSelectedAbsentIds([]); showToast('Moved to present.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Move selected → Present</button>
+                        </div>
                       </div>
                     )}
-                    <button type="button" className="mt-3 text-slate-400 hover:text-slate-200 text-sm" onClick={() => { const t = getAdminToken(); if (t && selectedMatchdayId) getMatchdayAttendanceSummary(selectedMatchdayId, t).then((sum) => setAttendanceSummary({ present: sum.present || [], absent: sum.absent || [] })).catch(() => setAttendanceSummary({ present: [], absent: [] })); }}>
-                      Refresh attendance
-                    </button>
+                    <button type="button" className="mt-3 text-slate-400 hover:text-slate-200 text-sm" onClick={() => { const t = getAdminToken(); if (t && selectedMatchdayId) getMatchdayAttendanceSummary(selectedMatchdayId, t).then((sum) => setAttendanceSummary({ present: sum.present || [], absent: sum.absent || [] })).catch(() => setAttendanceSummary({ present: [], absent: [] })); }}>Refresh attendance list</button>
                   </div>
                 )}
 
@@ -1152,27 +1082,12 @@ export default function Admin() {
                       <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg" onClick={async () => { showToast(''); try { await generateFixtures(selectedMatchdayId, getAdminToken()); showToast('Fixtures generated.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Generate fixtures</button>
                     ) : (
                       <>
-                        <div className="flex flex-wrap gap-2 mb-4">
-                          {!matchdayData.matchday?.fixtures_published && <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg" onClick={async () => { showToast(''); try { await publishFixtures(selectedMatchdayId, getAdminToken()); showToast('Fixtures published.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Publish fixtures</button>}
-                          <button type="button" className="py-2 px-4 bg-slate-600 text-slate-200 font-semibold rounded-lg hover:bg-slate-500" onClick={async () => { showToast(''); try { await addFixtureRound(selectedMatchdayId, getAdminToken()); showToast('New round added.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>+ Add next round (home+away)</button>
-                          {matchdayFixtures.some((f) => f.status === 'pending') && <button type="button" className="py-2 px-4 bg-slate-600 text-slate-200 font-semibold rounded-lg hover:bg-slate-500" onClick={async () => { showToast(''); try { await reshuffleFixtures(selectedMatchdayId, getAdminToken()); setSwapFixtureA(null); showToast('Pending fixtures reshuffled.'); refreshFixtures(selectedMatchdayId); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Reshuffle pending</button>}
-                        </div>
+                        {!matchdayData.matchday?.fixtures_published && <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg mb-4" onClick={async () => { showToast(''); try { await publishFixtures(selectedMatchdayId, getAdminToken()); showToast('Fixtures published.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Publish fixtures</button>}
                         <ul className="space-y-3">
                           {matchdayFixtures.map((f) => (
                             <li key={f.id} className="p-4 rounded-lg bg-slate-800/50 border border-slate-700 flex flex-wrap items-start gap-3">
                               <span className="font-medium">Group {f.group_a_index} vs Group {f.group_b_index} – {f.home_goals}–{f.away_goals} <span className="text-slate-400 text-sm">({f.status})</span></span>
-                              {f.status === 'pending' && (
-                                <>
-                                  {swapFixtureA === f.id ? (
-                                    <button type="button" className="py-1.5 px-3 bg-amber-500/20 text-amber-400 font-semibold rounded-lg text-sm border border-amber-500/40" onClick={() => setSwapFixtureA(null)}>Cancel swap</button>
-                                  ) : swapFixtureA !== null ? (
-                                    <button type="button" className="py-1.5 px-3 bg-primary/20 text-primary font-semibold rounded-lg text-sm border border-primary/30" onClick={async () => { try { await swapFixtures(selectedMatchdayId, swapFixtureA, f.id, getAdminToken()); setSwapFixtureA(null); showToast('Fixtures swapped.'); refreshFixtures(selectedMatchdayId); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>↕ Swap with this</button>
-                                  ) : (
-                                    <button type="button" className="py-1.5 px-3 bg-slate-600/60 text-slate-300 font-semibold rounded-lg text-sm hover:bg-slate-600" onClick={() => setSwapFixtureA(f.id)}>Select for swap</button>
-                                  )}
-                                  <button type="button" className="py-1.5 px-3 bg-primary text-background-dark font-semibold rounded-lg text-sm" onClick={async () => { setSwapFixtureA(null); try { await startFixture(selectedMatchdayId, f.id, getAdminToken()); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Start</button>
-                                </>
-                              )}
+                              {f.status === 'pending' && <button type="button" className="py-1.5 px-3 bg-primary text-background-dark font-semibold rounded-lg text-sm" onClick={async () => { try { await startFixture(selectedMatchdayId, f.id, getAdminToken()); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Start</button>}
                               {(f.status === 'in_progress' || f.status === 'completed') && (
                                 <>
                                   <button type="button" className="py-1.5 px-3 bg-slate-600 text-slate-100 font-semibold rounded-lg text-sm" onClick={() => { const open = addGoalFixtureId !== f.id; setAddGoalFixtureId(open ? f.id : null); if (open) { setAddGoalScorer(''); setAddGoalAssister(''); } }}>Add goal</button>
@@ -1191,7 +1106,7 @@ export default function Admin() {
                                   {(f.goals || []).map((g) => (
                                     <span key={g.id} className="inline-flex items-center gap-1.5 py-1 px-2 rounded bg-slate-700/80 text-slate-200 text-sm">
                                       {g.scorer_name}{g.assister_name ? ` (assist: ${g.assister_name})` : ''}
-                                      <button type="button" className="text-red-400 hover:underline text-xs font-medium" onClick={async () => { try { await removeGoal(selectedMatchdayId, f.id, g.id, getAdminToken()); showToast('Goal removed.'); refreshFixtures(selectedMatchdayId); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Remove</button>
+                                      <button type="button" className="text-red-400 hover:underline text-xs font-medium" onClick={async () => { try { await removeGoal(selectedMatchdayId, f.id, g.id, getAdminToken()); showToast('Goal removed.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Remove</button>
                                     </span>
                                   ))}
                                 </div>
@@ -1208,7 +1123,7 @@ export default function Admin() {
                                     <option value="">None</option>
                                     {(f.goal_choices || []).map((c) => <option key={c.id} value={c.id}>{c.baller_name}</option>)}
                                   </select>
-                                  <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg text-sm" onClick={async () => { const sid = addGoalScorer === '' ? null : Number(addGoalScorer); if (sid == null) { showToast('Select a scorer.'); return; } try { await addGoal(selectedMatchdayId, f.id, { scorer_player_id: sid, assister_player_id: addGoalAssister === '' ? null : Number(addGoalAssister) }, getAdminToken()); setAddGoalFixtureId(null); setAddGoalScorer(''); setAddGoalAssister(''); showToast(''); refreshFixtures(selectedMatchdayId); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Add goal</button>
+                                  <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg text-sm" onClick={async () => { const sid = addGoalScorer === '' ? null : Number(addGoalScorer); if (sid == null) { showToast('Select a scorer.'); return; } try { await addGoal(selectedMatchdayId, f.id, { scorer_player_id: sid, assister_player_id: addGoalAssister === '' ? null : Number(addGoalAssister) }, getAdminToken()); setAddGoalFixtureId(null); setAddGoalScorer(''); setAddGoalAssister(''); showToast(''); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Add goal</button>
                                 </div>
                               )}
                               {f.status === 'in_progress' && addCardFixtureId === f.id && addCardType && (
@@ -1219,7 +1134,7 @@ export default function Admin() {
                                     {(f.goal_choices || []).map((c) => <option key={c.id} value={c.id}>{c.baller_name}</option>)}
                                   </select>
                                   <div className="flex gap-2">
-                                    <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg text-sm" onClick={async () => { if (!addCardPlayerId) { showToast('Select a player.'); return; } try { await addMatchdayCard(selectedMatchdayId, { player_id: addCardPlayerId, card_type: addCardType, fixture_id: f.id }, getAdminToken()); setAddCardFixtureId(null); setAddCardType(null); setAddCardPlayerId(''); showToast(addCardType === 'yellow' ? 'Yellow card added.' : 'Red card added.'); refreshFixtures(selectedMatchdayId); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Confirm</button>
+                                    <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg text-sm" onClick={async () => { if (!addCardPlayerId) { showToast('Select a player.'); return; } try { await addMatchdayCard(selectedMatchdayId, { player_id: addCardPlayerId, card_type: addCardType, fixture_id: f.id }, getAdminToken()); setAddCardFixtureId(null); setAddCardType(null); setAddCardPlayerId(''); showToast(addCardType === 'yellow' ? 'Yellow card added.' : 'Red card added.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Confirm</button>
                                     <button type="button" className="py-2 px-4 bg-slate-600 text-slate-100 rounded-lg text-sm" onClick={() => { setAddCardFixtureId(null); setAddCardType(null); setAddCardPlayerId(''); }}>Cancel</button>
                                   </div>
                                 </div>
@@ -1255,19 +1170,9 @@ export default function Admin() {
                     <table className="w-full text-sm">
                       <thead><tr className="text-slate-400 border-b border-slate-700"><th className="text-left py-2 px-2">#</th><th className="text-left py-2 px-2">Player</th><th className="text-left py-2 px-2">Group</th><th className="text-right py-2 px-2 font-bold text-primary">Rating</th></tr></thead>
                       <tbody>
-                        {(() => {
-                          const hasCompletedFixture = matchdayFixtures.some((f) => f.status === 'completed');
-                          return matchdayPlayerRatings.map((row, idx) => (
-                            <tr key={row.player_id} className="border-b border-slate-700/50 hover:bg-primary/5">
-                              <td className="py-2 px-2 text-slate-500">{idx + 1}</td>
-                              <td className="py-2 px-2">{row.baller_name} #{row.jersey_number}</td>
-                              <td className="py-2 px-2">Group {row.group_index}</td>
-                              <td className="py-2 px-2 text-right font-bold text-primary">
-                                {hasCompletedFixture ? row.rating : <span className="text-slate-500">—</span>}
-                              </td>
-                            </tr>
-                          ));
-                        })()}
+                        {matchdayPlayerRatings.map((row, idx) => (
+                          <tr key={row.player_id} className="border-b border-slate-700/50 hover:bg-primary/5"><td className="py-2 px-2 text-slate-500">{idx + 1}</td><td className="py-2 px-2">{row.baller_name} #{row.jersey_number}</td><td className="py-2 px-2">Group {row.group_index}</td><td className="py-2 px-2 text-right font-bold text-primary">{row.rating}</td></tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>

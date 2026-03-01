@@ -356,26 +356,6 @@ export async function publishFixtures(matchdayId, token) {
   return res.data;
 }
 
-export async function addFixtureRound(matchdayId, token) {
-  const res = await footballApi.post(`/admin/matchdays/${matchdayId}/fixtures/add-round`, null, { headers: { Authorization: `Bearer ${token}` } });
-  return res.data;
-}
-
-export async function swapFixtures(matchdayId, fixtureIdA, fixtureIdB, token) {
-  const res = await footballApi.put(`/admin/matchdays/${matchdayId}/fixtures/swap`, { fixture_id_a: fixtureIdA, fixture_id_b: fixtureIdB }, { headers: { Authorization: `Bearer ${token}` } });
-  return res.data;
-}
-
-export async function reshuffleFixtures(matchdayId, token) {
-  const res = await footballApi.post(`/admin/matchdays/${matchdayId}/fixtures/reshuffle`, null, { headers: { Authorization: `Bearer ${token}` } });
-  return res.data;
-}
-
-export async function addLateMember(matchdayId, groupId, playerId, token) {
-  const res = await footballApi.post(`/admin/matchdays/${matchdayId}/groups/add-late-member`, { group_id: groupId, player_id: playerId }, { headers: { Authorization: `Bearer ${token}` } });
-  return res.data;
-}
-
 export async function startFixture(matchdayId, fixtureId, token) {
   const res = await footballApi.post(`/admin/matchdays/${matchdayId}/fixtures/${fixtureId}/start`, null, { headers: { Authorization: `Bearer ${token}` } });
   return res.data;
@@ -454,25 +434,6 @@ export async function getMemberLeaderboard(token) {
   if (cached) return cached;
   const res = await footballApi.get(`/member/leaderboard?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
   cacheSet(cacheKey, res.data);
-  return res.data;
-}
-
-// ---------------------------------------------------------------------------
-// Member profile — self-edit
-// ---------------------------------------------------------------------------
-
-export async function getMemberProfile(token) {
-  const res = await footballApi.get('/member/profile', { headers: { Authorization: `Bearer ${token}` } });
-  return res.data;
-}
-
-export async function updateMemberProfile(token, data) {
-  const res = await footballApi.put('/member/profile', data, { headers: { Authorization: `Bearer ${token}` } });
-  return res.data;
-}
-
-export async function changeMemberPassword(token, data) {
-  const res = await footballApi.put('/member/password', data, { headers: { Authorization: `Bearer ${token}` } });
   return res.data;
 }
 
