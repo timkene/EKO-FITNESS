@@ -1842,7 +1842,8 @@ def _star_rating_by_quartile(conn, _cache: Optional[dict] = None) -> dict:
 
 @router.get("/member/stats")
 def member_my_stats(payload: dict = Depends(require_player)):
-    """Current member's stats. Uses request-scoped cache for speed."""
+    """Current member's career stats. Fast-path reuses leaderboard cache; slow-path computes all players once
+    and caches leaderboard + top_three as a side-effect so subsequent calls are instant."""
     player_id = int(payload["sub"])
     cache_key = f"stats:{player_id}"
     cached = _sc_get(cache_key)
@@ -1850,22 +1851,75 @@ def member_my_stats(payload: dict = Depends(require_player)):
         return JSONResponse(content=cached, headers=NO_CACHE_HEADERS)
     conn = get_conn()
     cache = {}
-    stats = _player_career_stats(conn, player_id, cache)
-    stars_map = _star_rating_by_quartile(conn, cache)
-    star_rating = stars_map.get(player_id, 0)
-    all_players = conn.execute("SELECT id FROM FOOTBALL.players WHERE status = 'approved' AND id > 0").fetchall()
-    leader = []
-    for (pid,) in all_players:
+
+    # Fast path: leaderboard already cached — only compute this player's own data
+    lb = _sc_get("leaderboard")
+    if lb is not None:
+        stats = _player_career_stats(conn, player_id, cache)
+        rank, star_rating = None, 0
+        for i, row in enumerate(lb["leaderboard"], 1):
+            if row["player_id"] == player_id:
+                rank = i
+                star_rating = row.get("star_rating", 0)
+                break
+        result = {"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating}
+        _sc_set(cache_key, result)
+        return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
+
+    # Slow path: compute all players ONCE (was being computed twice before), cache leaderboard + top_three as bonus
+    all_players = conn.execute(
+        "SELECT id, baller_name, jersey_number FROM FOOTBALL.players WHERE status = 'approved' AND id > 0 ORDER BY baller_name"
+    ).fetchall()
+    lb_out = []
+    my_stats = None
+    for pid, baller, jersey in all_players:
         s = _player_career_stats(conn, pid, cache)
-        if s["matchday_ratings"]:
-            leader.append({"player_id": pid, "average_rating": s["average_rating"]})
-    leader.sort(key=lambda x: -x["average_rating"])
-    rank = None
-    for i, row in enumerate(leader, 1):
+        if pid == player_id:
+            my_stats = s
+        lb_out.append({
+            "player_id": pid, "baller_name": baller, "jersey_number": jersey or 0,
+            "goals": s["goals"], "assists": s["assists"],
+            "yellow_cards": s["yellow_cards"], "red_cards": s["red_cards"],
+            "clean_sheets": s["clean_sheets"], "matchdays_present": s["matchdays_present"],
+            "average_rating": s["average_rating"],
+        })
+    lb_out.sort(key=lambda x: (-x["average_rating"], -x["goals"], -x["assists"]))
+    rated = [(r["player_id"], r["average_rating"]) for r in lb_out if r["average_rating"] > 0]
+    n = len(rated)
+    stars = {r["player_id"]: 0 for r in lb_out}
+    for i, (pid, _) in enumerate(rated):
+        if i < n // 4:
+            stars[pid] = 5
+        elif i < n // 2:
+            stars[pid] = 4
+        elif i < (3 * n) // 4:
+            stars[pid] = 3
+        else:
+            stars[pid] = 1
+    for row in lb_out:
+        row["star_rating"] = stars.get(row["player_id"], 0)
+    top_goals = sorted(lb_out, key=lambda x: (-x["goals"], -x["assists"], -x["average_rating"]))[:5]
+    top_assists = sorted(lb_out, key=lambda x: (-x["assists"], -x["goals"], -x["average_rating"]))[:5]
+    top_present = sorted(lb_out, key=lambda x: (-x["matchdays_present"], -x["average_rating"]))[:5]
+    top_clean_sheets = sorted(lb_out, key=lambda x: (-x["clean_sheets"], -x["average_rating"]))[:5]
+    _sc_set("leaderboard", {
+        "success": True, "leaderboard": lb_out,
+        "top_goals": top_goals, "top_assists": top_assists,
+        "top_present": top_present, "top_clean_sheets": top_clean_sheets,
+    })
+    _sc_set("top_three", {"success": True, "top_three": [
+        {k: r[k] for k in ("player_id", "baller_name", "jersey_number", "average_rating", "goals", "assists", "matchdays_present")}
+        for r in lb_out if r["average_rating"] > 0
+    ][:3]})
+    rank, star_rating = None, 0
+    for i, row in enumerate(lb_out, 1):
         if row["player_id"] == player_id:
             rank = i
+            star_rating = stars.get(player_id, 0)
             break
-    result = {"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating}
+    if my_stats is None:
+        my_stats = _player_career_stats(conn, player_id, cache)
+    result = {"success": True, "stats": my_stats, "global_rank": rank, "star_rating": star_rating}
     _sc_set(cache_key, result)
     return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
 

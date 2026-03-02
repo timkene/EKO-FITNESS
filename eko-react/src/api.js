@@ -431,30 +431,38 @@ export async function getMemberMatchdayTable(matchdayId, token) {
 // ---------------------------------------------------------------------------
 // Member stats/leaderboard — cached on client + always fresh from server
 // Cache is cleared on endMatchday/reopenMatchday above.
+// In-flight map prevents thundering herd: if the same endpoint is already
+// fetching (e.g. two components mount simultaneously), they share one request.
 // ---------------------------------------------------------------------------
 
 const noCache = { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' };
+const _inflight = new Map();
 
 function memberNoCacheHeaders(token) {
   return { Authorization: `Bearer ${token}`, ...noCache };
 }
 
-export async function getMemberStats(token) {
-  const cacheKey = `stats:${token}`;
+function cachedFetch(cacheKey, fetcher) {
   const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-  const res = await footballApi.get(`/member/stats?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
-  cacheSet(cacheKey, res.data);
-  return res.data;
+  if (cached) return Promise.resolve(cached);
+  if (_inflight.has(cacheKey)) return _inflight.get(cacheKey);
+  const p = fetcher()
+    .then(data => { cacheSet(cacheKey, data); return data; })
+    .finally(() => _inflight.delete(cacheKey));
+  _inflight.set(cacheKey, p);
+  return p;
 }
 
-export async function getMemberLeaderboard(token) {
-  const cacheKey = `leaderboard:${token}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-  const res = await footballApi.get(`/member/leaderboard?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
-  cacheSet(cacheKey, res.data);
-  return res.data;
+export function getMemberStats(token) {
+  return cachedFetch(`stats:${token}`, () =>
+    footballApi.get(`/member/stats?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 }).then(r => r.data)
+  );
+}
+
+export function getMemberLeaderboard(token) {
+  return cachedFetch(`leaderboard:${token}`, () =>
+    footballApi.get(`/member/leaderboard?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 }).then(r => r.data)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -476,11 +484,8 @@ export async function changeMemberPassword(token, data) {
   return res.data;
 }
 
-export async function getMemberTopThreeBallers(token) {
-  const cacheKey = `topthree:${token}`;
-  const cached = cacheGet(cacheKey);
-  if (cached) return cached;
-  const res = await footballApi.get(`/member/top-three-ballers?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 });
-  cacheSet(cacheKey, res.data);
-  return res.data;
+export function getMemberTopThreeBallers(token) {
+  return cachedFetch(`topthree:${token}`, () =>
+    footballApi.get(`/member/top-three-ballers?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 }).then(r => r.data)
+  );
 }
