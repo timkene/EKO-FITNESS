@@ -862,11 +862,14 @@ def _matchday_row_to_dict(conn, row):
 
 
 def _get_matchday_by_id(conn, matchday_id: int):
-    """Get matchday dict by id or None."""
+    """Get matchday dict by id or None. ORDER BY voting_opens_at DESC handles the rare case of duplicate
+    ids caused by a sequence reset in MotherDuck — prefers the most recently created row."""
     row = conn.execute("""
         SELECT id, sunday_date, status, voting_opens_at, voting_closes_at, created_at, reviewed_at,
                COALESCE(groups_published, false), COALESCE(fixtures_published, false), COALESCE(matchday_ended, false)
         FROM FOOTBALL.matchdays WHERE id = ?
+        ORDER BY voting_opens_at DESC
+        LIMIT 1
     """, [matchday_id]).fetchone()
     if not row:
         return None
@@ -958,11 +961,14 @@ def admin_create_matchday(body: CreateMatchdayBody, payload: dict = Depends(requ
     closes_ts = closes_at.strftime("%Y-%m-%d %H:%M:%S")
     conn = get_conn()
     try:
-        # Use sequence so ids are never reused after delete (avoids "Duplicate key id: 1" when recreating for same day)
+        # Always use max(sequence, MAX_existing+1) so a reset sequence can never produce a duplicate id
+        seq_id = 0
         try:
-            next_id = conn.execute("SELECT nextval('FOOTBALL.matchday_id_seq')").fetchone()[0]
+            seq_id = conn.execute("SELECT nextval('FOOTBALL.matchday_id_seq')").fetchone()[0]
         except Exception:
-            next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.matchdays").fetchone()[0]
+            pass
+        max_existing = conn.execute("SELECT COALESCE(MAX(id), 0) FROM FOOTBALL.matchdays").fetchone()[0]
+        next_id = max(int(seq_id), int(max_existing) + 1)
         conn.execute("""
             INSERT INTO FOOTBALL.matchdays (id, sunday_date, status, voting_opens_at, voting_closes_at, groups_published, fixtures_published, matchday_ended)
             VALUES (?, ?, 'voting_open', ?, ?, false, false, false)
@@ -981,7 +987,9 @@ def admin_list_matchdays(payload: dict = Depends(require_admin)):
     rows = conn.execute("""
         SELECT id, sunday_date, status, voting_opens_at, voting_closes_at, created_at, reviewed_at,
                COALESCE(groups_published, false), COALESCE(fixtures_published, false), COALESCE(matchday_ended, false)
-        FROM FOOTBALL.matchdays ORDER BY sunday_date DESC, id DESC
+        FROM FOOTBALL.matchdays
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY voting_opens_at DESC) = 1
+        ORDER BY sunday_date DESC, id DESC
     """).fetchall()
     return {"success": True, "matchdays": [_matchday_row_to_dict(conn, r) for r in rows]}
 
@@ -1032,7 +1040,9 @@ def member_list_matchdays(payload: dict = Depends(require_player)):
     rows = conn.execute("""
         SELECT id, sunday_date, status, voting_opens_at, voting_closes_at, created_at, reviewed_at,
                COALESCE(groups_published, false), COALESCE(fixtures_published, false), COALESCE(matchday_ended, false)
-        FROM FOOTBALL.matchdays ORDER BY sunday_date DESC, id DESC
+        FROM FOOTBALL.matchdays
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY voting_opens_at DESC) = 1
+        ORDER BY sunday_date DESC, id DESC
     """).fetchall()
     matchdays = [_matchday_row_to_dict(conn, r) for r in rows]
     return {"success": True, "matchdays": matchdays}
@@ -1480,27 +1490,135 @@ def admin_delete_player(player_id: int, payload: dict = Depends(require_admin)):
 
 
 def _ensure_groups(conn, matchday_id: int):
-    """Create random groups of 5 players + implicit Others (6 slots) from players who voted on this matchday."""
+    """Create smart groups of 5 players (+ implicit Others) from players who voted.
+
+    Algorithm:
+    1. Skill-balanced snake draft — players ranked by career goals+assists so the top
+       players are spread across all groups, never concentrated in one.
+    2. Pair-history minimization — weighted co-occurrence from the last 8 ended matchdays
+       (most recent matchday weight 1.0, then 0.5, 0.33 … decaying). Local search swaps
+       same-tier players between groups to minimise repeat pairings without breaking
+       the skill balance.
+
+    Over a year this naturally ensures everyone plays with everyone while keeping
+    each matchday's groups fair and varied.
+    """
     existing = conn.execute("SELECT id FROM FOOTBALL.matchday_group_members WHERE matchday_id = ?", [matchday_id]).fetchone()
     if existing:
         return
-    rows = conn.execute("""
-        SELECT player_id FROM FOOTBALL.matchday_votes WHERE matchday_id = ? AND player_id > 0
-    """, [matchday_id]).fetchall()
+    rows = conn.execute(
+        "SELECT player_id FROM FOOTBALL.matchday_votes WHERE matchday_id = ? AND player_id > 0",
+        [matchday_id]
+    ).fetchall()
     player_ids = [r[0] for r in rows if r[0]]
+    if not player_ids:
+        return
+
     import random
-    random.shuffle(player_ids)
-    group_size = 5  # 5 players + 1 (Others) per team = 6 slots; Others is implicit, not stored
-    group_index = 0
+
+    n = len(player_ids)
+    group_size = 5
+    n_groups = max(1, (n + group_size - 1) // group_size)
+
+    # ── 1. Skill score (batch: 2 queries instead of 2×N) ──────────────────────
+    ph = ",".join("?" * n)
+    g_rows = conn.execute(
+        f"SELECT scorer_player_id, COUNT(*) FROM FOOTBALL.fixture_goals "
+        f"WHERE scorer_player_id IN ({ph}) GROUP BY scorer_player_id",
+        player_ids
+    ).fetchall()
+    a_rows = conn.execute(
+        f"SELECT assister_player_id, COUNT(*) FROM FOOTBALL.fixture_goals "
+        f"WHERE assister_player_id IN ({ph}) AND assister_player_id IS NOT NULL GROUP BY assister_player_id",
+        player_ids
+    ).fetchall()
+    goals_map  = {r[0]: r[1] for r in g_rows}
+    assist_map = {r[0]: r[1] for r in a_rows}
+    # goals×2 + assists as skill proxy; ties broken randomly for variety
+    skill = {pid: goals_map.get(pid, 0) * 2 + assist_map.get(pid, 0) for pid in player_ids}
+
+    # ── 2. Pair co-occurrence history (last 8 ended matchdays, recency-weighted) ─
+    pair_cost: dict = {}
+    past = conn.execute(
+        "SELECT id FROM FOOTBALL.matchdays "
+        "WHERE id != ? AND COALESCE(matchday_ended, false) = true "
+        "ORDER BY sunday_date DESC, id DESC LIMIT 8",
+        [matchday_id]
+    ).fetchall()
+    for rank, (mid,) in enumerate(past):
+        w = 1.0 / (rank + 1)          # 1.0, 0.5, 0.33, 0.25 …
+        gm = conn.execute(
+            "SELECT group_id, player_id FROM FOOTBALL.matchday_group_members "
+            "WHERE matchday_id = ? AND player_id > 0",
+            [mid]
+        ).fetchall()
+        by_grp: dict = {}
+        for gid, pid in gm:
+            by_grp.setdefault(gid, []).append(pid)
+        for members in by_grp.values():
+            for i in range(len(members)):
+                for j in range(i + 1, len(members)):
+                    key = (min(members[i], members[j]), max(members[i], members[j]))
+                    pair_cost[key] = pair_cost.get(key, 0.0) + w
+
+    # ── 3. Snake draft (skill balance) ─────────────────────────────────────────
+    # Sort descending by skill; random tiebreak so new players don't all pile into
+    # the last group.
+    ranked = sorted(player_ids, key=lambda p: (-skill.get(p, 0), random.random()))
+    rank_of = {pid: i for i, pid in enumerate(ranked)}
+
+    groups: list = [[] for _ in range(n_groups)]
+    for i, pid in enumerate(ranked):
+        row_num = i // n_groups
+        col     = i % n_groups
+        if row_num % 2 == 1:            # reverse direction on odd rows
+            col = n_groups - 1 - col
+        groups[col].append(pid)
+
+    # ── 4. Local search: swap same-tier players to minimise repeat pairings ────
+    # "Same tier" = same snake row → skill balance is preserved exactly.
+    def grp_cost(grp):
+        s = 0.0
+        for i in range(len(grp)):
+            for j in range(i + 1, len(grp)):
+                s += pair_cost.get((min(grp[i], grp[j]), max(grp[i], grp[j])), 0.0)
+        return s
+
+    for _ in range(400):
+        gi = random.randrange(n_groups)
+        gj = random.randrange(n_groups)
+        if gi == gj or not groups[gi] or not groups[gj]:
+            continue
+        ii = random.randrange(len(groups[gi]))
+        jj = random.randrange(len(groups[gj]))
+        pi, pj = groups[gi][ii], groups[gj][jj]
+        # Only swap within the same skill tier to keep groups balanced
+        if rank_of[pi] // n_groups != rank_of[pj] // n_groups:
+            continue
+        old = grp_cost(groups[gi]) + grp_cost(groups[gj])
+        groups[gi][ii], groups[gj][jj] = groups[gj][jj], groups[gi][ii]
+        if grp_cost(groups[gi]) + grp_cost(groups[gj]) >= old:
+            groups[gi][ii], groups[gj][jj] = groups[gj][jj], groups[gi][ii]   # revert
+
+    # Shuffle order within each group (position inside a group is meaningless)
+    for g in groups:
+        random.shuffle(g)
+
+    # ── 5. Persist to DB ───────────────────────────────────────────────────────
     next_gid = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.matchday_groups").fetchone()[0]
     next_mid = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.matchday_group_members").fetchone()[0]
-    for i in range(0, len(player_ids), group_size):
-        group_index += 1
+    for gidx, members in enumerate(groups, 1):
         gid = next_gid
         next_gid += 1
-        conn.execute("INSERT INTO FOOTBALL.matchday_groups (id, matchday_id, group_index) VALUES (?, ?, ?)", [gid, matchday_id, group_index])
-        for pid in player_ids[i : i + group_size]:
-            conn.execute("INSERT INTO FOOTBALL.matchday_group_members (id, matchday_id, group_id, player_id) VALUES (?, ?, ?, ?)", [next_mid, matchday_id, gid, pid])
+        conn.execute(
+            "INSERT INTO FOOTBALL.matchday_groups (id, matchday_id, group_index) VALUES (?, ?, ?)",
+            [gid, matchday_id, gidx]
+        )
+        for pid in members:
+            conn.execute(
+                "INSERT INTO FOOTBALL.matchday_group_members (id, matchday_id, group_id, player_id) VALUES (?, ?, ?, ?)",
+                [next_mid, matchday_id, gid, pid]
+            )
             next_mid += 1
 
 
