@@ -6,4 +6,4 @@ pydantic[email]>=2.0.0
 email-validator>=2.0.0
 passlib[bcrypt]>=1.7.4
 python-multipart>=0.0.6
-duckdb>=0.9.0
+duckdb==1.4.4
