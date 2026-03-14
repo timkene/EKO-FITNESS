@@ -310,6 +310,10 @@ export default function Dashboard() {
                 <p className="text-slate-400 text-xs uppercase font-bold mb-1">Rating per matchday</p>
                 <p className="text-sm font-bold text-slate-300">{memberStats.stats.matchday_ratings?.length ? `${memberStats.stats.matchday_ratings.length} matchdays` : '—'}</p>
               </div>
+              <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 p-3">
+                <p className="text-amber-400 text-xs uppercase font-bold mb-1">Man of the Match</p>
+                <p className="text-2xl font-black text-amber-400">{memberStats.stats.motm_count ?? 0}</p>
+              </div>
             </div>
             {memberStats.stats.matchday_ratings?.length > 0 && (
               <details className="mt-4">
@@ -317,6 +321,20 @@ export default function Dashboard() {
                 <ul className="mt-2 space-y-1 text-sm">
                   {memberStats.stats.matchday_ratings.map((r) => (
                     <li key={r.matchday_id}><span className="text-slate-400">{r.sunday_date}</span> <strong className="text-primary">{r.rating}</strong></li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {memberStats.stats.motm_matchdays?.length > 0 && (
+              <details className="mt-4">
+                <summary className="text-sm text-amber-400 cursor-pointer hover:text-amber-300">Show Man of the Match awards ({memberStats.stats.motm_count})</summary>
+                <ul className="mt-2 space-y-1 text-sm">
+                  {memberStats.stats.motm_matchdays.map((r) => (
+                    <li key={r.matchday_id} className="flex items-center gap-2">
+                      <span className="text-amber-400">★</span>
+                      <span className="text-slate-400">{r.sunday_date}</span>
+                      <span className="text-amber-300 font-semibold">Man of the Match</span>
+                    </li>
                   ))}
                 </ul>
               </details>

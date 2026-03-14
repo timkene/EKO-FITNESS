@@ -101,6 +101,12 @@ function PlayerModal({ player, onClose }) {
               <span className="text-red-400">{player.red_cards}R</span>
             </p>
           </div>
+          {(player.motm_count ?? 0) > 0 && (
+            <div className="col-span-2 bg-amber-500/10 border border-amber-500/30 rounded-lg p-2.5">
+              <p className="text-amber-400 text-xs uppercase font-bold mb-0.5">Man of the Match</p>
+              <p className="text-amber-400 font-black text-lg">★ ×{player.motm_count}</p>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -153,6 +159,7 @@ export default function Leaderboard() {
   const topAssists = data?.top_assists || [];
   const topPresent = data?.top_present || [];
   const topCleanSheets = data?.top_clean_sheets || [];
+  const topMotm = data?.top_motm || [];
 
   const totalPages = Math.ceil(leaderboard.length / PAGE_SIZE);
   const visibleRows = leaderboard.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -191,6 +198,7 @@ export default function Leaderboard() {
                 <th className="text-center py-2 md:py-3 px-1.5 md:px-2">P</th>
                 <th className="text-center py-2 md:py-3 px-1.5 md:px-2">Y</th>
                 <th className="text-center py-2 md:py-3 px-1.5 md:px-2">R</th>
+                <th className="text-center py-2 md:py-3 px-1.5 md:px-2 text-amber-400">★</th>
               </tr>
             </thead>
             <tbody>
@@ -213,6 +221,7 @@ export default function Leaderboard() {
                     <td className="py-2 px-1.5 md:px-2 text-center">{row.matchdays_present}</td>
                     <td className="py-2 px-1.5 md:px-2 text-center text-amber-400">{row.yellow_cards}</td>
                     <td className="py-2 px-1.5 md:px-2 text-center text-red-400">{row.red_cards}</td>
+                    <td className="py-2 px-1.5 md:px-2 text-center text-amber-400">{row.motm_count > 0 ? `★${row.motm_count}` : '—'}</td>
                   </tr>
                 ))
               }
@@ -248,6 +257,9 @@ export default function Leaderboard() {
           <TopTable title="Top assists overall" list={topAssists} metricKey="assists" metricLabel="Assists" playerId={player.id} onPlayerClick={setSelectedPlayer} />
           <TopTable title="Top present overall" list={topPresent} metricKey="matchdays_present" metricLabel="Present" playerId={player.id} onPlayerClick={setSelectedPlayer} />
           <TopTable title="Top clean sheets overall" list={topCleanSheets} metricKey="clean_sheets" metricLabel="Clean sheets" playerId={player.id} onPlayerClick={setSelectedPlayer} />
+          {topMotm.length > 0 && (
+            <TopTable title="★ Man of the Match awards" list={topMotm} metricKey="motm_count" metricLabel="MOTM" playerId={player.id} onPlayerClick={setSelectedPlayer} />
+          )}
         </div>
       </div>
     </>

@@ -1173,10 +1173,23 @@ def _player_career_stats(conn, player_id: int, _cache: Optional[dict] = None) ->
                 else:
                     clean_sheets += _group_clean_sheet_fixtures_count(conn, mid, g[0])
     avg = round(sum(r["rating"] for r in matchday_ratings_list) / len(matchday_ratings_list), 2) if matchday_ratings_list else 0.0
+    # MOTM awards
+    try:
+        motm_rows = conn.execute("""
+            SELECT mm.matchday_id, m.sunday_date
+            FROM FOOTBALL.matchday_motm mm
+            JOIN FOOTBALL.matchdays m ON m.id = mm.matchday_id
+            WHERE mm.player_id = ?
+            ORDER BY m.sunday_date
+        """, [player_id]).fetchall()
+        motm_matchdays_list = [{"matchday_id": r[0], "sunday_date": str(r[1])[:10]} for r in motm_rows]
+    except Exception:
+        motm_matchdays_list = []
     return {
         "goals": goals, "assists": assists, "yellow_cards": yellows, "red_cards": reds,
         "clean_sheets": clean_sheets, "matchdays_present": matchdays_present,
         "matchday_ratings": matchday_ratings_list, "average_rating": avg,
+        "motm_count": len(motm_matchdays_list), "motm_matchdays": motm_matchdays_list,
     }
 
 
@@ -1518,7 +1531,10 @@ def _ensure_groups(conn, matchday_id: int):
 
     n = len(player_ids)
     group_size = 5
-    n_groups = max(1, (n + group_size - 1) // group_size)
+    # n_full_groups groups of exactly 5; any remainder goes into one last smaller group
+    n_full_groups = max(1, n // group_size)
+    remainder = n % group_size
+    n_groups = n_full_groups + (1 if remainder > 0 else 0)
 
     # ── 1. Skill score (batch: 2 queries instead of 2×N) ──────────────────────
     ph = ",".join("?" * n)
@@ -1567,16 +1583,24 @@ def _ensure_groups(conn, matchday_id: int):
     ranked = sorted(player_ids, key=lambda p: (-skill.get(p, 0), random.random()))
     rank_of = {pid: i for i, pid in enumerate(ranked)}
 
+    # Distribute the first n_full_groups*5 players across n_full_groups full groups via
+    # snake draft.  Any remaining players (< 5) form a last, smaller group.
+    main_pool = ranked[:n_full_groups * group_size]
+    rest_pool = ranked[n_full_groups * group_size:]
+
     groups: list = [[] for _ in range(n_groups)]
-    for i, pid in enumerate(ranked):
-        row_num = i // n_groups
-        col     = i % n_groups
+    for i, pid in enumerate(main_pool):
+        row_num = i // n_full_groups
+        col     = i % n_full_groups
         if row_num % 2 == 1:            # reverse direction on odd rows
-            col = n_groups - 1 - col
+            col = n_full_groups - 1 - col
         groups[col].append(pid)
+    for pid in rest_pool:
+        groups[-1].append(pid)
 
     # ── 4. Local search: swap same-tier players to minimise repeat pairings ────
     # "Same tier" = same snake row → skill balance is preserved exactly.
+    # Only swap among full groups (first n_full_groups); leave the small last group alone.
     def grp_cost(grp):
         s = 0.0
         for i in range(len(grp)):
@@ -1585,15 +1609,17 @@ def _ensure_groups(conn, matchday_id: int):
         return s
 
     for _ in range(400):
-        gi = random.randrange(n_groups)
-        gj = random.randrange(n_groups)
+        if n_full_groups < 2:
+            break
+        gi = random.randrange(n_full_groups)
+        gj = random.randrange(n_full_groups)
         if gi == gj or not groups[gi] or not groups[gj]:
             continue
         ii = random.randrange(len(groups[gi]))
         jj = random.randrange(len(groups[gj]))
         pi, pj = groups[gi][ii], groups[gj][jj]
         # Only swap within the same skill tier to keep groups balanced
-        if rank_of[pi] // n_groups != rank_of[pj] // n_groups:
+        if rank_of[pi] // n_full_groups != rank_of[pj] // n_full_groups:
             continue
         old = grp_cost(groups[gi]) + grp_cost(groups[gj])
         groups[gi][ii], groups[gj][jj] = groups[gj][jj], groups[gi][ii]
@@ -1999,7 +2025,7 @@ def member_my_stats(payload: dict = Depends(require_player)):
             "goals": s["goals"], "assists": s["assists"],
             "yellow_cards": s["yellow_cards"], "red_cards": s["red_cards"],
             "clean_sheets": s["clean_sheets"], "matchdays_present": s["matchdays_present"],
-            "average_rating": s["average_rating"],
+            "average_rating": s["average_rating"], "motm_count": s.get("motm_count", 0),
         })
     lb_out.sort(key=lambda x: (-x["average_rating"], -x["goals"], -x["assists"]))
     rated = [(r["player_id"], r["average_rating"]) for r in lb_out if r["average_rating"] > 0]
@@ -2020,10 +2046,12 @@ def member_my_stats(payload: dict = Depends(require_player)):
     top_assists = sorted(lb_out, key=lambda x: (-x["assists"], -x["goals"], -x["average_rating"]))[:5]
     top_present = sorted(lb_out, key=lambda x: (-x["matchdays_present"], -x["average_rating"]))[:5]
     top_clean_sheets = sorted(lb_out, key=lambda x: (-x["clean_sheets"], -x["average_rating"]))[:5]
+    top_motm = sorted([r for r in lb_out if r.get("motm_count", 0) > 0], key=lambda x: (-x["motm_count"], -x["average_rating"]))[:5]
     _sc_set("leaderboard", {
         "success": True, "leaderboard": lb_out,
         "top_goals": top_goals, "top_assists": top_assists,
         "top_present": top_present, "top_clean_sheets": top_clean_sheets,
+        "top_motm": top_motm,
     })
     _sc_set("top_three", {"success": True, "top_three": [
         {k: r[k] for k in ("player_id", "baller_name", "jersey_number", "average_rating", "goals", "assists", "matchdays_present")}
@@ -2059,7 +2087,7 @@ def member_leaderboard(payload: dict = Depends(require_player)):
             "goals": s["goals"], "assists": s["assists"],
             "yellow_cards": s["yellow_cards"], "red_cards": s["red_cards"],
             "clean_sheets": s["clean_sheets"], "matchdays_present": s["matchdays_present"],
-            "average_rating": s["average_rating"],
+            "average_rating": s["average_rating"], "motm_count": s.get("motm_count", 0),
         })
     out.sort(key=lambda x: (-x["average_rating"], -x["goals"], -x["assists"]))
     # Compute stars from this list (quartiles by average_rating) so we don't call _star_rating_by_quartile again
@@ -2081,9 +2109,11 @@ def member_leaderboard(payload: dict = Depends(require_player)):
     top_assists = sorted(out, key=lambda x: (-x["assists"], -x["goals"], -x["average_rating"]))[:5]
     top_present = sorted(out, key=lambda x: (-x["matchdays_present"], -x["average_rating"]))[:5]
     top_clean_sheets = sorted(out, key=lambda x: (-x["clean_sheets"], -x["average_rating"]))[:5]
+    top_motm = sorted([r for r in out if r.get("motm_count", 0) > 0], key=lambda x: (-x["motm_count"], -x["average_rating"]))[:5]
     result = {
         "success": True, "leaderboard": out,
-        "top_goals": top_goals, "top_assists": top_assists, "top_present": top_present, "top_clean_sheets": top_clean_sheets,
+        "top_goals": top_goals, "top_assists": top_assists, "top_present": top_present,
+        "top_clean_sheets": top_clean_sheets, "top_motm": top_motm,
     }
     _sc_set("leaderboard", result)
     return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
@@ -2571,6 +2601,38 @@ def admin_end_fixture(matchday_id: int, fixture_id: int, payload: dict = Depends
     return {"success": True, "message": "Fixture ended."}
 
 
+def _ensure_motm_table(conn):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS FOOTBALL.matchday_motm (
+            matchday_id INTEGER NOT NULL,
+            player_id   INTEGER NOT NULL,
+            sunday_date DATE
+        )
+    """)
+
+
+def _compute_motm(conn, matchday_id: int) -> Optional[int]:
+    """Return the player_id of the highest-rated present player for an ended matchday."""
+    rows = conn.execute(
+        "SELECT DISTINCT mgm.player_id "
+        "FROM FOOTBALL.matchday_group_members mgm "
+        "JOIN FOOTBALL.matchday_attendance a "
+        "  ON a.matchday_id = mgm.matchday_id AND a.player_id = mgm.player_id "
+        "WHERE mgm.matchday_id = ? AND mgm.player_id > 0 AND a.present = true",
+        [matchday_id]
+    ).fetchall()
+    if not rows:
+        return None
+    cache: dict = {}
+    best_pid, best_rating = None, -1.0
+    for (pid,) in rows:
+        r = _player_matchday_rating(conn, matchday_id, pid, cache)
+        if r > best_rating:
+            best_rating = r
+            best_pid = pid
+    return best_pid
+
+
 @router.post("/admin/matchdays/{matchday_id:int}/end-matchday")
 def admin_end_matchday(matchday_id: int, payload: dict = Depends(require_admin)):
     """End the matchday (even if not all fixtures are played)."""
@@ -2580,6 +2642,18 @@ def admin_end_matchday(matchday_id: int, payload: dict = Depends(require_admin))
         raise HTTPException(status_code=404, detail="Matchday not found.")
     conn.execute("UPDATE FOOTBALL.matchdays SET matchday_ended = true WHERE id = ?", [matchday_id])
     conn.execute("UPDATE FOOTBALL.matchday_fixtures SET status = 'completed', ended_at = COALESCE(ended_at, current_timestamp) WHERE matchday_id = ? AND status = 'in_progress'", [matchday_id])
+    # Compute and persist Man of the Match
+    try:
+        _ensure_motm_table(conn)
+        conn.execute("DELETE FROM FOOTBALL.matchday_motm WHERE matchday_id = ?", [matchday_id])
+        motm_pid = _compute_motm(conn, matchday_id)
+        if motm_pid:
+            conn.execute(
+                "INSERT INTO FOOTBALL.matchday_motm (matchday_id, player_id, sunday_date) VALUES (?, ?, ?)",
+                [matchday_id, motm_pid, md["sunday_date"]]
+            )
+    except Exception:
+        pass  # Don't fail end-matchday if MOTM computation errors
     _sc_clear()  # stats/leaderboard now include this matchday's results
     return {"success": True, "message": "Matchday ended."}
 
