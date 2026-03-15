@@ -4,7 +4,8 @@ import { getPlayerAuth } from './Login';
 import { getMemberDues, submitPaymentEvidence, applyWaiver, listMemberMatchdays, getMemberMatchday, voteMatchday, getMemberStats, getMemberTopThreeBallers, invalidateStatsCache } from '../api';
 import JerseyAvatar from '../components/JerseyAvatar';
 import { useToast } from '../components/Toast';
-import { StatCardSkeleton, TopFiveSkeleton } from '../components/Skeleton';
+import { TopFiveSkeleton } from '../components/Skeleton';
+import { getSavedJersey, JerseySVG, fetchKitImage, fetchTeamFanart, FULL_TEAM_NAMES } from './JerseyDesigner';
 import './Dashboard.css';
 
 function useCountdown(sundayDateStr) {
@@ -15,10 +16,7 @@ function useCountdown(sundayDateStr) {
     const tick = () => {
       const now = new Date();
       let ms = kickoff - now;
-      if (ms <= 0) {
-        setLeft({ days: 0, hours: 0, mins: 0 });
-        return;
-      }
+      if (ms <= 0) { setLeft({ days: 0, hours: 0, mins: 0 }); return; }
       const days = Math.floor(ms / (24 * 60 * 60 * 1000));
       ms -= days * 24 * 60 * 60 * 1000;
       const hours = Math.floor(ms / (60 * 60 * 1000));
@@ -47,13 +45,23 @@ export default function Dashboard() {
   const [statsLoading, setStatsLoading] = useState(true);
   const [topThreeBallers, setTopThreeBallers] = useState([]);
   const [topThreeLoading, setTopThreeLoading] = useState(true);
+  const [heroKitImageUrl, setHeroKitImageUrl] = useState(null);
+  const [heroFanartUrl, setHeroFanartUrl] = useState(null);
   const fileInputRef = useRef(null);
+
+  // Fetch real kit photo + team fanart for hero
+  useEffect(() => {
+    const saved = getSavedJersey();
+    if (!saved?.sportsDbId) return;
+    const kitLabel = { home: 'Home', away: 'Away', third: 'Third' }[saved.kitType] || 'Home';
+    fetchKitImage(saved.sportsDbId, kitLabel).then(url => setHeroKitImageUrl(url || null));
+    fetchTeamFanart(saved.sportsDbId).then(url => setHeroFanartUrl(url || null));
+  }, []);
 
   useEffect(() => {
     if (!token) return;
     setStatsLoading(true);
     setTopThreeLoading(true);
-    // Fetch both in parallel — they share the same backend cache so the second is near-instant
     Promise.allSettled([getMemberStats(token), getMemberTopThreeBallers(token)]).then(([statsRes, topRes]) => {
       setMemberStats(statsRes.status === 'fulfilled' ? statsRes.value : null);
       setStatsLoading(false);
@@ -62,7 +70,6 @@ export default function Dashboard() {
     });
   }, [token]);
 
-  // Silently refetch stats when user returns to this tab after admin makes changes
   useEffect(() => {
     if (!token) return;
     const refetch = () => {
@@ -85,7 +92,7 @@ export default function Dashboard() {
   useEffect(() => {
     if (!token) return;
     getMemberDues(token)
-      .then((data) => setDues(data))
+      .then(setDues)
       .catch(() => setDues({ status: 'owing', pending_evidence: false, year: new Date().getFullYear(), quarter: Math.ceil((new Date().getMonth() + 1) / 3) }));
   }, [token]);
 
@@ -96,20 +103,11 @@ export default function Dashboard() {
       .catch(() => setMatchdays([]));
   }, [token]);
 
-  // Featured = first matchday that is voting_open or approved (not ended, not rejected)
   useEffect(() => {
-    if (!token || matchdays.length === 0) {
-      setFeaturedMatchday(null);
-      return;
-    }
+    if (!token || matchdays.length === 0) { setFeaturedMatchday(null); return; }
     const next = matchdays.find((md) => !md.matchday_ended && md.status !== 'rejected' && (md.status === 'voting_open' || md.status === 'approved'));
-    if (!next) {
-      setFeaturedMatchday(null);
-      return;
-    }
-    getMemberMatchday(next.id, token)
-      .then(setFeaturedMatchday)
-      .catch(() => setFeaturedMatchday(null));
+    if (!next) { setFeaturedMatchday(null); return; }
+    getMemberMatchday(next.id, token).then(setFeaturedMatchday).catch(() => setFeaturedMatchday(null));
   }, [token, matchdays]);
 
   const handleSendEvidence = () => fileInputRef.current?.click();
@@ -164,332 +162,416 @@ export default function Dashboard() {
   const hasVoting = md?.status === 'voting_open';
   const countdown = useCountdown(md?.sunday_date);
   const voteCount = featuredMatchday?.vote_count ?? 0;
+  const stats = memberStats?.stats;
+  const playerName = stats?.baller_name || player?.baller_name || 'Baller';
+  const level = stats?.matchdays_present ?? 0;
+  const recentMatchdays = matchdays.filter(m => m.matchday_ended).slice(0, 3);
+  const savedJersey = getSavedJersey();
 
   return (
-    <>
-      <header className="min-h-14 md:h-20 border-b border-primary/10 px-4 md:px-8 flex items-center justify-between sticky top-0 bg-background-light/80 dark:bg-background-dark/80 backdrop-blur-md z-10 safe-area-inset-top">
-        <h2 className="text-lg md:text-xl font-bold truncate">Team Dashboard</h2>
-        <div className="flex items-center gap-4 md:gap-6">
-          {md && (
-            <div className="hidden sm:flex items-center gap-3 px-4 py-2 bg-primary/5 rounded-lg border border-primary/10">
-              <span className="text-xs font-semibold text-primary uppercase tracking-widest">Next:</span>
-              <span className="text-sm font-bold">Matchday {md.sunday_date}</span>
-            </div>
+    <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen flex flex-col font-display">
+      <main className="flex-1 pb-6">
+        {/* ── Page heading (desktop only — mobile uses MemberLayout header) ── */}
+        <div className="hidden md:flex items-center justify-between px-4 pt-6 pb-2">
+          <div>
+            <h2 className="text-xl font-black text-slate-900 dark:text-white tracking-tight">Player Hub</h2>
+            <p className="text-xs text-slate-500">Welcome back, {playerName}</p>
+          </div>
+          {dues?.status === 'owing' && (
+            <span className="text-[10px] font-bold text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-2.5 py-1 uppercase tracking-widest">Dues owing</span>
           )}
         </div>
-      </header>
 
-      <div className="p-4 md:p-8 space-y-6 md:space-y-8 max-w-7xl mx-auto w-full overflow-x-hidden">
-        {/* EKO TOP 5 BALLERS — in their faces, mobile-friendly */}
-        <div className="bg-gradient-to-br from-amber-500/20 via-primary/10 to-slate-900/60 border-2 border-amber-500/30 rounded-xl md:rounded-2xl p-4 md:p-8 shadow-lg">
-          <h2 className="text-lg md:text-2xl font-black text-center mb-1 md:mb-2 uppercase tracking-wider text-amber-400">
-            EKO TOP 3 BALLERS
-          </h2>
-          <p className="text-slate-400 text-xs md:text-sm text-center mb-4 md:mb-6">Top 3 by rating — play to get here</p>
-          {topThreeLoading && <TopFiveSkeleton />}
-          {!topThreeLoading && topThreeBallers.length > 0 ? (
-            <div className="grid grid-cols-3 gap-3 md:gap-6 max-w-lg mx-auto">
-              {topThreeBallers.map((b, i) => (
-                <div key={b.player_id} className="flex flex-col items-center text-center min-w-0">
-                  <div className="relative flex justify-center">
-                    <JerseyAvatar shortName={b.baller_name} number={b.jersey_number} size="lg" className="mx-auto shrink-0" />
-                    <span className="absolute -top-0.5 -right-0.5 md:-top-1 md:-right-1 w-6 h-6 md:w-7 md:h-7 rounded-full bg-amber-500 text-slate-900 font-black text-xs md:text-sm flex items-center justify-center">{i + 1}</span>
+        {/* ── Hero + Top 3: shared row ── */}
+        <div className="px-4 py-3 md:py-4 flex flex-col md:flex-row items-stretch gap-4">
+
+        {/* ── Hero: Player Card ── */}
+        <div className="md:flex-[3] min-w-0">
+          <div
+            className="relative w-full h-full rounded-xl overflow-hidden border border-slate-200 dark:border-primary/10"
+            style={{ minHeight: '380px' }}
+          >
+            {/* Layer 1: base dark background */}
+            <div className="absolute inset-0" style={{ background: '#080d09' }} />
+
+            {/* Layer 2: fanart photo (when available) */}
+            {heroFanartUrl && (
+              <>
+                <div className="absolute inset-0" style={{ backgroundImage: `url(${heroFanartUrl})`, backgroundSize: 'cover', backgroundPosition: 'center top' }} />
+                <div className="absolute inset-0 bg-gradient-to-r from-black/88 via-black/55 to-black/25" />
+              </>
+            )}
+
+            {/* Layer 3: stadium spotlight + team color glows */}
+            <div className="absolute inset-0 overflow-hidden pointer-events-none">
+              {/* Stadium top spotlight */}
+              <div className="absolute inset-x-0 -top-10 h-64" style={{ background: 'radial-gradient(ellipse 75% 55% at 50% 0%, rgba(255,255,255,0.06) 0%, transparent 70%)' }} />
+              {savedJersey && (
+                <>
+                  <div className="absolute -right-10 -top-10 w-80 h-80 rounded-full"
+                       style={{ background: `radial-gradient(circle, ${savedJersey.teamColor || '#0ac247'}50 0%, transparent 65%)`, filter: 'blur(4px)' }} />
+                  <div className="absolute -left-10 bottom-0 w-56 h-56 rounded-full"
+                       style={{ background: `radial-gradient(circle, ${savedJersey.teamColor || '#0ac247'}20 0%, transparent 70%)` }} />
+                </>
+              )}
+            </div>
+
+            {/* Content: left jersey + right stats */}
+            <div className="relative z-10 flex" style={{ minHeight: '380px' }}>
+
+              {/* Left: club name + jersey (centered) */}
+              <div className="flex-1 flex flex-col items-center justify-center text-center px-4 pt-10 pb-14">
+                {savedJersey?.teamId && (
+                  <div className="mb-2">
+                    <p className="text-[10px] font-black uppercase tracking-[0.25em] text-primary mb-0.5">Club</p>
+                    <h2
+                      className="font-black text-white uppercase leading-tight"
+                      style={{ fontSize: 'clamp(13px, 3.8vw, 20px)', textShadow: '0 2px 16px rgba(0,0,0,0.9)' }}
+                    >
+                      {FULL_TEAM_NAMES[savedJersey.teamId] || savedJersey.teamName || ''}
+                    </h2>
+                    <span className="mt-1.5 inline-block text-[9px] font-bold text-primary uppercase tracking-widest border border-primary/40 rounded px-2 py-0.5 bg-primary/10">
+                      {savedJersey.kitType} Kit
+                    </span>
                   </div>
-                  <p className="font-bold text-slate-100 mt-1.5 md:mt-2 truncate w-full text-sm md:text-base">{b.baller_name}</p>
-                  <p className="text-primary font-black text-base md:text-lg">{b.average_rating}</p>
-                  <div className="flex gap-2 md:gap-3 mt-0.5 md:mt-1 text-[10px] md:text-xs text-slate-400">
-                    <span title="Goals">G {b.goals}</span>
-                    <span title="Assists">A {b.assists}</span>
-                    <span title="Present">P {b.matchdays_present}</span>
+                )}
+                {savedJersey?.kit ? (
+                  heroKitImageUrl ? (
+                    <>
+                      {(savedJersey.playerName || savedJersey.playerNumber) && (
+                        <div className="flex flex-col items-center leading-none mb-1">
+                          {savedJersey.playerName && (
+                            <span className="font-black tracking-[0.22em] text-white uppercase" style={{ fontSize: 13, textShadow: '0 2px 8px rgba(0,0,0,0.9)' }}>
+                              {savedJersey.playerName.toUpperCase().slice(0, 11)}
+                            </span>
+                          )}
+                          {savedJersey.playerNumber && (
+                            <span className="font-black text-white" style={{ fontSize: 40, lineHeight: 1, textShadow: '0 2px 14px rgba(0,0,0,0.9)' }}>
+                              {savedJersey.playerNumber}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      <img src={heroKitImageUrl} alt="kit" className="object-contain drop-shadow-2xl" style={{ width: 185, height: 185 }} onError={() => setHeroKitImageUrl(null)} />
+                    </>
+                  ) : (
+                    <JerseySVG kit={savedJersey.kit} playerName={savedJersey.playerName || playerName} playerNumber={savedJersey.playerNumber || ''} size={185} />
+                  )
+                ) : (
+                  <span className="material-symbols-outlined text-primary opacity-20" style={{ fontSize: '80px' }}>apparel</span>
+                )}
+              </div>
+
+              {/* Right: Stats panel — bottom aligned */}
+              <div className="w-[148px] shrink-0 flex flex-col justify-end pb-14 pr-3 pt-8 pl-1">
+                {statsLoading ? (
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {[1,2,3,4,5,6].map(i => <div key={i} className="h-10 rounded-lg bg-white/5 animate-pulse" />)}
+                  </div>
+                ) : stats ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-1.5 mb-1.5">
+                      {[
+                        { label: 'Goals',   value: stats.goals ?? 0 },
+                        { label: 'Assists', value: stats.assists ?? 0 },
+                        { label: 'Present', value: stats.matchdays_present ?? 0 },
+                        { label: 'Avg Rtg', value: stats.average_rating ?? '—' },
+                        { label: 'C/Sheet', value: stats.clean_sheets ?? 0 },
+                        { label: 'Yellows', value: stats.yellow_cards ?? 0 },
+                      ].map(({ label, value }) => (
+                        <div key={label} className="flex flex-col items-center bg-white/5 border border-white/8 rounded-lg py-1.5 px-1">
+                          <span className="text-[8px] text-slate-400 uppercase font-bold tracking-wide leading-tight mb-0.5">{label}</span>
+                          <span className="text-sm font-black text-white leading-tight">{value}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center justify-between bg-amber-500/10 border border-amber-500/25 rounded-lg px-2.5 py-1.5">
+                      <span className="text-[9px] text-amber-400 uppercase font-black tracking-wide">MOTM</span>
+                      <span className="text-base font-black text-amber-400 leading-none">{stats.motm_count ?? 0}</span>
+                    </div>
+                    {memberStats?.global_rank && (
+                      <button onClick={() => navigate('/leaderboard')} className="mt-1.5 text-[9px] text-primary font-bold uppercase tracking-widest text-right w-full">
+                        #{memberStats.global_rank} Global →
+                      </button>
+                    )}
+                  </>
+                ) : null}
+              </div>
+            </div>
+
+            {/* Rating badge — top left */}
+            {stats?.average_rating && (
+              <div className="absolute top-3 left-3 z-20 bg-primary/90 text-white rounded-lg px-3 py-1 text-xs font-black uppercase tracking-widest">
+                ★ {stats.average_rating}
+              </div>
+            )}
+
+            {/* Pick kit CTA (no jersey) */}
+            {!savedJersey && (
+              <button
+                onClick={() => navigate('/jersey')}
+                className="absolute top-3 right-3 z-20 bg-primary/80 text-white rounded-lg px-3 py-1.5 text-xs font-bold flex items-center gap-1 backdrop-blur-sm"
+              >
+                <span className="material-symbols-outlined text-sm">checkroom</span>
+                Pick your kit
+              </button>
+            )}
+
+            {/* Change kit — small round icon, top right, won't overlap jersey */}
+            {savedJersey && (
+              <button
+                onClick={() => navigate('/jersey')}
+                className="absolute top-3 right-3 z-20 w-9 h-9 rounded-full bg-black/50 border border-white/15 flex items-center justify-center text-white/70 hover:text-white hover:border-white/30 transition-colors"
+                aria-label="Change kit"
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 18 }}>edit</span>
+              </button>
+            )}
+
+            {/* XP bar — pinned to bottom, always visible */}
+            <div className="absolute bottom-0 left-0 right-0 z-20 px-5 pb-3 pt-8 bg-gradient-to-t from-black/85 to-transparent pointer-events-none">
+              <div className="flex items-center gap-2 w-full max-w-xs">
+                <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                  <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${Math.min(100, (level / 30) * 100)}%` }} />
+                </div>
+                <span className="text-xs text-primary font-bold">{level} games</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* ── EKO TOP 3 BALLERS — Podium (second column) ── */}
+        <div className="md:flex-[2] min-w-0">
+          <div className="h-full bg-[#0d1117] border border-[#1e2433] rounded-xl p-4 flex flex-col" style={{ boxShadow: '0 0 40px rgba(251,191,36,0.06)' }}>
+            <div className="flex justify-between items-start mb-1">
+              <div>
+                <h2 className="text-sm font-black uppercase tracking-wider text-amber-400">Top 3 Ballers</h2>
+                <p className="text-[10px] text-slate-500">Season performance leaders</p>
+              </div>
+              <button onClick={() => navigate('/leaderboard')} className="text-primary text-[10px] font-bold uppercase hover:underline">Full Leaderboard</button>
+            </div>
+            {topThreeLoading && <TopFiveSkeleton />}
+            {!topThreeLoading && topThreeBallers.length > 0 ? (
+              <div className="flex items-end justify-center gap-2 flex-1 pt-4 pb-2">
+                {/* #2 Silver */}
+                {topThreeBallers[1] && (
+                  <div className="flex flex-col items-center flex-1">
+                    <div className="relative mb-2">
+                      <JerseyAvatar shortName={topThreeBallers[1].baller_name} number={topThreeBallers[1].jersey_number} size="md" className="mx-auto" />
+                      <span className="absolute -top-1 -right-1 w-5 h-5 bg-slate-400 rounded-full text-[9px] font-black text-black flex items-center justify-center">2</span>
+                    </div>
+                    <div className="w-full rounded-t-xl border-x border-t border-slate-500/30 flex flex-col items-center justify-end pb-2 pt-3 px-1" style={{ height: 96, background: 'linear-gradient(to top, rgba(148,163,184,0.15), rgba(148,163,184,0.05))' }}>
+                      <p className="text-xs font-bold truncate w-full text-center text-slate-200">{topThreeBallers[1].baller_name}</p>
+                      <p className="text-primary font-black text-sm">{topThreeBallers[1].average_rating}</p>
+                      <p className="text-[9px] text-slate-500">G{topThreeBallers[1].goals} A{topThreeBallers[1].assists}</p>
+                    </div>
+                  </div>
+                )}
+                {/* #1 Gold — tallest */}
+                {topThreeBallers[0] && (
+                  <div className="flex flex-col items-center flex-1">
+                    <div className="text-amber-400 text-lg text-center mb-0.5">👑</div>
+                    <div className="relative mb-2">
+                      <JerseyAvatar shortName={topThreeBallers[0].baller_name} number={topThreeBallers[0].jersey_number} size="lg" className="mx-auto ring-2 ring-amber-500/40 rounded-lg" />
+                      <span className="absolute -top-1 -right-1 w-6 h-6 bg-amber-500 rounded-full text-[10px] font-black text-black flex items-center justify-center shadow-lg shadow-amber-500/30">1</span>
+                    </div>
+                    <div className="w-full rounded-t-xl border-x border-t border-amber-500/30 flex flex-col items-center justify-end pb-2 pt-3 px-1" style={{ height: 132, background: 'linear-gradient(to top, rgba(245,158,11,0.2), rgba(245,158,11,0.05))' }}>
+                      <p className="text-sm font-bold truncate w-full text-center text-white">{topThreeBallers[0].baller_name}</p>
+                      <p className="text-[9px] text-amber-400 uppercase font-black tracking-wider">Gold Rank</p>
+                      <p className="text-primary font-black text-base">{topThreeBallers[0].average_rating}</p>
+                      <p className="text-[9px] text-slate-400">G{topThreeBallers[0].goals} A{topThreeBallers[0].assists}</p>
+                    </div>
+                  </div>
+                )}
+                {/* #3 Bronze */}
+                {topThreeBallers[2] && (
+                  <div className="flex flex-col items-center flex-1">
+                    <div className="relative mb-2">
+                      <JerseyAvatar shortName={topThreeBallers[2].baller_name} number={topThreeBallers[2].jersey_number} size="md" className="mx-auto" />
+                      <span className="absolute -top-1 -right-1 w-5 h-5 bg-amber-700 rounded-full text-[9px] font-black text-white flex items-center justify-center">3</span>
+                    </div>
+                    <div className="w-full rounded-t-xl border-x border-t border-amber-700/30 flex flex-col items-center justify-end pb-2 pt-3 px-1" style={{ height: 72, background: 'linear-gradient(to top, rgba(180,83,9,0.15), rgba(180,83,9,0.05))' }}>
+                      <p className="text-xs font-bold truncate w-full text-center text-slate-200">{topThreeBallers[2].baller_name}</p>
+                      <p className="text-primary font-black text-sm">{topThreeBallers[2].average_rating}</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : !topThreeLoading ? (
+              <p className="text-slate-500 text-center py-8 text-sm flex-1 flex items-center justify-center">Play a matchday to see rankings.</p>
+            ) : null}
+          </div>
+        </div>
+
+        </div>{/* end hero+top3 row */}
+
+        {/* ── Next Match + Voting (merged FIFA card) ── */}
+        {md && (
+          <div className="px-4 mb-6">
+            <div className="relative rounded-xl overflow-hidden border border-[#1e2433] bg-[#0d1117]">
+              {/* Background photo */}
+              <div className="absolute inset-0" style={{ backgroundImage: "url('https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=800')", backgroundSize: 'cover', backgroundPosition: 'center', opacity: 0.15 }} />
+              <div className="absolute inset-0 bg-gradient-to-r from-[#0d1117] via-[#0d1117]/80 to-transparent" />
+              {/* Glow */}
+              <div className="absolute top-0 right-0 w-64 h-64 rounded-full pointer-events-none" style={{ background: 'radial-gradient(circle, rgba(10,194,71,0.08) 0%, transparent 70%)' }} />
+
+              <div className="relative z-10 p-5 md:p-6 flex flex-col md:flex-row gap-6">
+                {/* Left: match info + countdown */}
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="px-2.5 py-1 bg-primary/20 border border-primary/30 text-primary text-[10px] font-black uppercase rounded-lg tracking-widest">Next Match</span>
+                    <span className="text-slate-500 text-xs">Sunday {md.sunday_date} · 18:00</span>
+                  </div>
+                  <h3 className="text-xl font-black text-white mb-4">Eko Football Matchday</h3>
+                  <div className="flex items-center gap-6">
+                    {[
+                      { val: countdown.days, lbl: 'Days' },
+                      { val: countdown.hours, lbl: 'Hrs' },
+                      { val: countdown.mins, lbl: 'Min' },
+                    ].map(({ val, lbl }, idx) => (
+                      <div key={lbl} className="flex items-center gap-6">
+                        {idx > 0 && <span className="text-primary/30 text-xl font-black -ml-3">:</span>}
+                        <div className="flex flex-col items-center">
+                          <span className="text-3xl font-black text-white tabular-nums">{String(val).padStart(2, '0')}</span>
+                          <span className="text-[9px] uppercase font-bold text-slate-500 tracking-widest">{lbl}</span>
+                        </div>
+                      </div>
+                    ))}
+                    <button type="button" onClick={() => navigate('/matchday')} className="ml-auto py-2 px-4 bg-primary text-black text-xs font-black rounded-xl flex items-center gap-1 shadow-lg shadow-primary/20">
+                      <span className="material-symbols-outlined text-base">arrow_forward</span>
+                      Details
+                    </button>
+                  </div>
+                </div>
+
+                {/* Right: attendance voting */}
+                {hasVoting && (
+                  <div className="md:w-64 shrink-0 border-t md:border-t-0 md:border-l border-[#1e2433] md:pl-6 pt-4 md:pt-0">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Are you attending?</p>
+                    <div className="flex gap-2 mb-4">
+                      <button
+                        type="button"
+                        onClick={handleVote}
+                        disabled={featuredMatchday?.voted || !featuredMatchday?.can_vote || voting}
+                        className={`flex-1 py-2.5 text-xs font-black uppercase rounded-xl transition-all shadow-lg ${featuredMatchday?.voted ? 'bg-primary text-black shadow-primary/20' : 'bg-primary/90 text-black hover:bg-primary shadow-primary/10'}`}
+                      >
+                        {featuredMatchday?.voted ? '✓ In' : voting ? '...' : "I'm In"}
+                      </button>
+                      <button type="button" onClick={() => navigate('/matchday')} className="flex-1 py-2.5 text-xs font-black uppercase rounded-xl bg-white/5 border border-[#1e2433] text-slate-300 hover:bg-white/10 transition-all">
+                        Maybe
+                      </button>
+                      <button type="button" onClick={() => navigate('/matchday')} className="flex-1 py-2.5 text-xs font-black uppercase rounded-xl bg-white/5 border border-[#1e2433] text-slate-400 hover:border-red-500/40 hover:text-red-400 transition-all">
+                        Out
+                      </button>
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="flex justify-between text-[10px] font-bold">
+                        <span className="text-slate-500 uppercase tracking-wider">Confirmed Squad</span>
+                        <span className="text-primary">{voteCount} / 18</span>
+                      </div>
+                      <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+                        <div className="h-full bg-primary rounded-full transition-all shadow-sm shadow-primary/40" style={{ width: `${Math.min(100, (voteCount / 18) * 100)}%` }} />
+                      </div>
+                    </div>
+                    {!featuredMatchday?.can_vote && !featuredMatchday?.voted && (
+                      <p className="text-slate-500 text-[10px] mt-2">Only paid or waiver members can vote.</p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Recent Matchdays ── */}
+        {recentMatchdays.length > 0 && (
+          <div className="px-4 mb-6">
+            <h3 className="text-lg font-bold mb-4">Recent Matchdays</h3>
+            <div className="space-y-3">
+              {recentMatchdays.map((m) => (
+                <div
+                  key={m.id}
+                  onClick={() => navigate('/matchday')}
+                  className="flex items-center justify-between p-4 bg-white dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700/50 rounded-xl cursor-pointer hover:border-primary/40 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="size-10 rounded-full bg-primary/10 flex items-center justify-center">
+                      <span className="material-symbols-outlined text-primary text-lg">sports_soccer</span>
+                    </div>
+                    <div>
+                      <p className="text-sm font-bold">Matchday {m.sunday_date}</p>
+                      <p className="text-[10px] text-slate-500 uppercase font-bold">Ended</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-bold bg-slate-100 dark:bg-slate-700/50 px-2 py-1 rounded">Finished</span>
+                    <span className="material-symbols-outlined text-slate-400 text-base">chevron_right</span>
                   </div>
                 </div>
               ))}
             </div>
-          ) : !topThreeLoading ? (
-            <p className="text-slate-400 text-center py-4 md:py-6 text-sm md:text-base px-2">Complete at least one matchday to see the EKO TOP 3 BALLERS.</p>
-          ) : null}
+          </div>
+        )}
+
+        {/* ── Dues ── */}
+        <div className="px-4 mb-6">
+          <div className="bg-white dark:bg-slate-800/40 border border-slate-200 dark:border-primary/20 rounded-xl p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <span className="material-symbols-outlined text-primary">payments</span>
+              <h3 className="font-bold">Quarterly Dues</h3>
+              <span className="ml-auto text-xs text-slate-500">{period}</span>
+            </div>
+            <div className={`inline-block px-3 py-1.5 rounded-lg text-sm font-semibold mb-3 ${dues?.status === 'paid' ? 'bg-primary/20 text-primary' : dues?.status === 'waiver' ? 'bg-amber-500/20 text-amber-400' : 'bg-red-500/20 text-red-400'}`}>
+              {dues?.status === 'paid' ? '✓ Paid' : dues?.status === 'waiver' ? 'Waiver granted' : 'Payment owing'}
+            </div>
+            {dues?.status === 'waiver' && dues?.waiver_due_by && (
+              <p className="text-slate-500 text-xs mb-3">Pay by {dues.waiver_due_by}</p>
+            )}
+            {dues?.status !== 'paid' && !dues?.pending_evidence && (
+              <>
+                {dues?.status === 'owing' && (
+                  <form onSubmit={handleApplyWaiver} className="flex flex-wrap items-end gap-3 mb-3">
+                    <label className="block w-full text-xs text-slate-500">Apply for waiver (commit to pay by date)</label>
+                    <input type="date" value={waiverDue} onChange={(e) => setWaiverDue(e.target.value)} required className="rounded-lg bg-slate-100 dark:bg-slate-700 border border-slate-300 dark:border-slate-600 px-3 py-2 text-sm" />
+                    <button type="submit" className="py-2 px-4 bg-primary text-white font-bold rounded-lg text-sm">Apply</button>
+                  </form>
+                )}
+                <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="image/*,.pdf" className="hidden" />
+                <button type="button" onClick={handleSendEvidence} disabled={uploading} className="py-2 px-4 bg-primary text-white font-bold rounded-lg text-sm disabled:opacity-60 flex items-center gap-2">
+                  <span className="material-symbols-outlined text-base">upload</span>
+                  {uploading ? 'Uploading...' : 'Send payment evidence'}
+                </button>
+              </>
+            )}
+            {dues?.pending_evidence && <p className="text-slate-500 text-xs">Payment evidence under review.</p>}
+          </div>
         </div>
 
-        {/* Hero: Featured match + countdown (same UX as reference) */}
-        {md && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2 relative group overflow-hidden rounded-xl h-64 flex flex-col justify-end p-8">
-              <div
-                className="absolute inset-0 bg-cover bg-center transition-transform duration-500 group-hover:scale-105"
-                style={{ backgroundImage: "linear-gradient(to top, rgba(16, 34, 22, 0.95), rgba(16, 34, 22, 0.2)), url('https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=800')" }}
-                aria-hidden
-              />
-              <div className="relative z-0">
-                <div className="flex items-center gap-3 mb-2">
-                  <span className="bg-primary text-background-dark text-[10px] font-black px-2 py-0.5 rounded uppercase">Featured Match</span>
-                  <span className="text-white/80 text-sm font-medium">Sunday, {md.sunday_date} • 18:00</span>
-                </div>
-                <h1 className="text-2xl sm:text-4xl font-black text-white leading-tight">Eko Football Matchday</h1>
-                <p className="text-primary text-lg font-semibold tracking-wide flex items-center gap-2 mt-1">
-                  <span className="material-symbols-outlined text-xl">location_on</span>
-                  Eko Football — Matchday
-                </p>
-              </div>
-            </div>
-            {/* Countdown widget */}
-            <div className="bg-primary/5 border border-primary/20 rounded-xl p-6 flex flex-col justify-center items-center text-center">
-              <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-primary mb-6">Kickoff In</h3>
-              <div className="flex gap-4">
-                <div className="flex flex-col items-center">
-                  <span className="text-4xl font-black text-slate-900 dark:text-slate-100">{String(countdown.days).padStart(2, '0')}</span>
-                  <span className="text-[10px] uppercase font-bold text-slate-600 dark:text-slate-500 mt-1">Days</span>
-                </div>
-                <span className="text-3xl font-black text-slate-400 dark:text-primary/30 mt-1">:</span>
-                <div className="flex flex-col items-center">
-                  <span className="text-4xl font-black text-slate-900 dark:text-slate-100">{String(countdown.hours).padStart(2, '0')}</span>
-                  <span className="text-[10px] uppercase font-bold text-slate-600 dark:text-slate-500 mt-1">Hours</span>
-                </div>
-                <span className="text-3xl font-black text-slate-400 dark:text-primary/30 mt-1">:</span>
-                <div className="flex flex-col items-center">
-                  <span className="text-4xl font-black text-slate-900 dark:text-slate-100">{String(countdown.mins).padStart(2, '0')}</span>
-                  <span className="text-[10px] uppercase font-bold text-slate-600 dark:text-slate-500 mt-1">Mins</span>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => navigate('/matchday')}
-                className="mt-8 w-full min-h-[44px] py-3 bg-primary text-background-dark font-bold rounded-lg hover:shadow-[0_0_20px_rgba(10,194,71,0.3)] transition-all flex items-center justify-center gap-2 touch-manipulation"
-              >
-                <span className="material-symbols-outlined text-lg">confirmation_number</span>
-                Match Details
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* My stats: 8 metrics + global rank */}
-        {token && statsLoading && (
-          <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6 md:p-8">
-            <div className="h-5 w-24 bg-slate-700/50 rounded animate-pulse mb-4" />
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              {[1,2,3,4,5,6,7,8].map((i) => <StatCardSkeleton key={i} />)}
-            </div>
-          </div>
-        )}
-        {memberStats?.stats && (
-          <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6 md:p-8">
-            <h2 className="text-xl md:text-2xl font-bold mb-2">My stats</h2>
-            {memberStats.global_rank != null && (
-              <p className="text-primary font-bold mb-4">You are <span className="text-2xl">#{memberStats.global_rank}</span> on the global rating table (by average rating). <button type="button" onClick={() => navigate('/leaderboard')} className="text-sm underline hover:no-underline ml-2">View leaderboard</button></p>
-            )}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-              <div className="rounded-lg bg-slate-800/50 p-3">
-                <p className="text-slate-400 text-xs uppercase font-bold mb-1">Overall rating (avg)</p>
-                <p className="text-2xl font-black text-primary">{memberStats.stats.average_rating}</p>
-              </div>
-              <div className="rounded-lg bg-slate-800/50 p-3">
-                <p className="text-slate-400 text-xs uppercase font-bold mb-1">Goals</p>
-                <p className="text-2xl font-black text-white">{memberStats.stats.goals}</p>
-              </div>
-              <div className="rounded-lg bg-slate-800/50 p-3">
-                <p className="text-slate-400 text-xs uppercase font-bold mb-1">Assists</p>
-                <p className="text-2xl font-black text-white">{memberStats.stats.assists}</p>
-              </div>
-              <div className="rounded-lg bg-slate-800/50 p-3">
-                <p className="text-slate-400 text-xs uppercase font-bold mb-1">Clean sheets</p>
-                <p className="text-2xl font-black text-white">{memberStats.stats.clean_sheets}</p>
-              </div>
-              <div className="rounded-lg bg-slate-800/50 p-3">
-                <p className="text-slate-400 text-xs uppercase font-bold mb-1">Matchdays present</p>
-                <p className="text-2xl font-black text-white">{memberStats.stats.matchdays_present}</p>
-              </div>
-              <div className="rounded-lg bg-slate-800/50 p-3">
-                <p className="text-slate-400 text-xs uppercase font-bold mb-1">Yellow cards</p>
-                <p className="text-2xl font-black text-amber-400">{memberStats.stats.yellow_cards}</p>
-              </div>
-              <div className="rounded-lg bg-slate-800/50 p-3">
-                <p className="text-slate-400 text-xs uppercase font-bold mb-1">Red cards</p>
-                <p className="text-2xl font-black text-red-400">{memberStats.stats.red_cards}</p>
-              </div>
-              <div className="rounded-lg bg-slate-800/50 p-3">
-                <p className="text-slate-400 text-xs uppercase font-bold mb-1">Rating per matchday</p>
-                <p className="text-sm font-bold text-slate-300">{memberStats.stats.matchday_ratings?.length ? `${memberStats.stats.matchday_ratings.length} matchdays` : '—'}</p>
-              </div>
-              <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 p-3">
-                <p className="text-amber-400 text-xs uppercase font-bold mb-1">Man of the Match</p>
-                <p className="text-2xl font-black text-amber-400">{memberStats.stats.motm_count ?? 0}</p>
-              </div>
-            </div>
-            {memberStats.stats.matchday_ratings?.length > 0 && (
-              <details className="mt-4">
-                <summary className="text-sm text-slate-400 cursor-pointer hover:text-primary">Show rating per matchday</summary>
-                <ul className="mt-2 space-y-1 text-sm">
-                  {memberStats.stats.matchday_ratings.map((r) => (
-                    <li key={r.matchday_id}><span className="text-slate-400">{r.sunday_date}</span> <strong className="text-primary">{r.rating}</strong></li>
-                  ))}
-                </ul>
-              </details>
-            )}
-            {memberStats.stats.motm_matchdays?.length > 0 && (
-              <details className="mt-4">
-                <summary className="text-sm text-amber-400 cursor-pointer hover:text-amber-300">Show Man of the Match awards ({memberStats.stats.motm_count})</summary>
-                <ul className="mt-2 space-y-1 text-sm">
-                  {memberStats.stats.motm_matchdays.map((r) => (
-                    <li key={r.matchday_id} className="flex items-center gap-2">
-                      <span className="text-amber-400">★</span>
-                      <span className="text-slate-400">{r.sunday_date}</span>
-                      <span className="text-amber-300 font-semibold">Man of the Match</span>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            )}
-          </div>
-        )}
-
-        {/* Voting + Dues + Roster grid */}
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 md:gap-8">
-          <div className="lg:col-span-3 space-y-6">
-            {/* Next Match Voting — same UX as reference (I'm In / Unavailable / Maybe) */}
-            {hasVoting && (
-              <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-8">
-                <div className="flex justify-between items-start mb-8">
-                  <div>
-                    <h2 className="text-2xl font-bold mb-1 text-black">Next Match Voting</h2>
-                    <p className="text-black text-sm">Are you available for the upcoming match on <span className="text-black font-bold">{md.sunday_date}</span>?</p>
+        {/* ── Team Roster ── */}
+        {featuredMatchday?.my_group?.members?.length > 0 && (
+          <div className="px-4 mb-6">
+            <h3 className="text-lg font-bold mb-4">My Group</h3>
+            <div className="bg-white dark:bg-slate-800/40 border border-slate-200 dark:border-primary/20 rounded-xl overflow-hidden">
+              {featuredMatchday.my_group.members.map((m) => (
+                <div key={m.id} className="flex items-center gap-3 p-3 border-b border-slate-100 dark:border-slate-700/50 last:border-0 hover:bg-primary/5 transition-colors">
+                  <JerseyAvatar shortName={m.baller_name} number={m.jersey_number} status="in" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-bold truncate text-slate-900 dark:text-slate-100">{m.baller_name}</p>
+                    <p className="text-[10px] text-slate-500 uppercase">{m.first_name} {m.surname}</p>
                   </div>
-                  {featuredMatchday?.my_group?.members?.length > 0 && (
-                    <div className="flex -space-x-2">
-                      {featuredMatchday.my_group.members.slice(0, 3).map((m) => (
-                        <JerseyAvatar key={m.id} shortName={m.baller_name} number={m.jersey_number} className="ring-2 ring-slate-900 rounded-lg" />
-                      ))}
-                      {featuredMatchday.my_group.members.length > 3 && (
-                        <div className="size-8 rounded-lg border-2 border-slate-800 bg-slate-700 flex items-center justify-center text-[10px] font-bold text-black">+{featuredMatchday.my_group.members.length - 3}</div>
-                      )}
-                    </div>
-                  )}
+                  <span className="bg-primary/10 text-primary text-[10px] px-2 py-0.5 rounded font-bold">IN</span>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <button
-                    type="button"
-                    onClick={handleVote}
-                    disabled={featuredMatchday?.voted || !featuredMatchday?.can_vote || voting}
-                    className={`flex flex-col items-center gap-3 p-6 rounded-xl border-2 transition-all ${featuredMatchday?.voted ? 'border-primary bg-primary/10' : 'border-transparent bg-slate-800/50 hover:border-primary hover:bg-primary/20'}`}
-                  >
-                    <span className="material-symbols-outlined text-4xl text-primary font-bold">check_circle</span>
-                    <span className="font-bold text-lg text-black">I'm In</span>
-                    <span className="text-xs text-black uppercase font-black">
-                      {featuredMatchday?.voted ? 'You voted' : voting ? 'Submitting...' : `${voteCount} Player${voteCount !== 1 ? 's' : ''} Confirmed`}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => navigate('/matchday')}
-                    className="flex flex-col items-center gap-3 p-6 rounded-xl border-2 border-transparent bg-slate-800/50 hover:border-red-500/50 transition-all group"
-                  >
-                    <span className="material-symbols-outlined text-4xl text-slate-600 group-hover:text-red-500 transition-colors">cancel</span>
-                    <span className="font-bold text-lg text-black">Unavailable</span>
-                    <span className="text-xs text-black uppercase font-black">Not this time</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => navigate('/matchday')}
-                    className="flex flex-col items-center gap-3 p-6 rounded-xl border-2 border-transparent bg-slate-800/50 hover:border-amber-500/50 transition-all group"
-                  >
-                    <span className="material-symbols-outlined text-4xl text-slate-600 group-hover:text-amber-500 transition-colors">help</span>
-                    <span className="font-bold text-lg text-black">Maybe</span>
-                    <span className="text-xs text-black uppercase font-black">Check Matchday</span>
-                  </button>
-                </div>
-                <div className="mt-10 pt-10 border-t border-primary/5 flex flex-wrap gap-10">
-                  <div>
-                    <p className="text-[10px] uppercase font-black text-black mb-3 tracking-widest">Venue</p>
-                    <div className="flex items-start gap-4">
-                      <div className="size-20 rounded-lg bg-slate-800 flex items-center justify-center">
-                        <span className="material-symbols-outlined text-3xl text-primary/60">stadium</span>
-                      </div>
-                      <div>
-                        <p className="font-bold text-black">Eko Football</p>
-                        <p className="text-sm text-black">Matchday {md.sunday_date}</p>
-                        <button type="button" onClick={() => navigate('/matchday')} className="text-black text-xs font-bold hover:underline mt-1 block">Match Details</button>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex-1 min-w-[200px]">
-                    <p className="text-[10px] uppercase font-black text-black mb-3 tracking-widest">Squad Status</p>
-                    <div className="flex gap-2 items-center">
-                      <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
-                        <div className="h-full bg-primary transition-all" style={{ width: `${Math.min(100, (voteCount / 18) * 100)}%` }} />
-                      </div>
-                      <span className="text-xs font-bold text-black">{voteCount} in</span>
-                    </div>
-                    <p className="text-xs text-black mt-3 italic">Confirm availability above. View full roster on Matchday.</p>
-                  </div>
-                </div>
-                {!featuredMatchday?.can_vote && !featuredMatchday?.voted && (
-                  <p className="text-black text-sm mt-4">Only paid or waiver members can vote.</p>
-                )}
-              </div>
-            )}
-
-            {/* Dues card */}
-            <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6 md:p-8">
-              <h2 className="text-xl md:text-2xl font-bold mb-1">Quarterly dues</h2>
-              <p className="text-slate-900 dark:text-slate-100 text-sm mb-4">{period}</p>
-              <div className={`inline-block px-4 py-2 rounded-lg font-semibold ${dues?.status === 'paid' ? 'bg-primary/20 text-primary' : dues?.status === 'waiver' ? 'bg-amber-500/20 text-amber-400' : 'bg-red-500/20 text-red-400'}`}>
-                {dues?.status === 'paid' ? 'Paid' : dues?.status === 'waiver' ? 'Waiver' : 'Owing'}
-              </div>
-              {dues?.status === 'waiver' && dues?.waiver_due_by && (
-                <p className="text-slate-900 dark:text-slate-100 text-sm mt-3">Pay by {dues.waiver_due_by}</p>
-              )}
-              {dues?.status !== 'paid' && !dues?.pending_evidence && (
-                <>
-                  {dues?.status === 'owing' && (
-                    <form onSubmit={handleApplyWaiver} className="mt-4 flex flex-wrap items-end gap-3">
-                      <label className="block w-full text-sm text-slate-900 dark:text-slate-100">Apply for waiver (pay by date)</label>
-                      <input type="date" value={waiverDue} onChange={(e) => setWaiverDue(e.target.value)} required className="rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-sm" />
-                      <button type="submit" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg hover:bg-primary/90">Apply for waiver</button>
-                    </form>
-                  )}
-                  <input type="file" ref={fileInputRef} onChange={handleFileChange} accept="image/*,.pdf" className="hidden" />
-                  <button type="button" onClick={handleSendEvidence} disabled={uploading} className="mt-4 py-2 px-4 bg-primary text-background-dark font-bold rounded-lg hover:bg-primary/90 disabled:opacity-60">
-                    {uploading ? 'Uploading...' : 'Send payment evidence'}
-                  </button>
-                </>
-              )}
-              {dues?.pending_evidence && <p className="text-slate-900 dark:text-slate-100 text-sm mt-3">Payment evidence under review.</p>}
-            </div>
-          </div>
-
-          {/* Team Roster — jersey avatars (same UX as reference) */}
-          <div className="lg:col-span-1 space-y-6">
-            <div className="bg-slate-900/40 border border-primary/10 rounded-xl flex flex-col h-full">
-              <div className="p-5 border-b border-primary/10 flex items-center justify-between">
-                <h3 className="font-bold text-sm uppercase tracking-wider">Team Roster</h3>
-              </div>
-              <div className="p-2 flex-1 overflow-y-auto max-h-[500px] custom-scrollbar">
-                {featuredMatchday?.my_group?.members?.length > 0 ? (
-                  featuredMatchday.my_group.members.map((m) => (
-                    <div key={m.id} className="flex items-center gap-3 p-3 rounded-lg hover:bg-primary/5 transition-colors group">
-                      <JerseyAvatar shortName={m.baller_name} number={m.jersey_number} status="in" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-bold truncate group-hover:text-primary transition-colors text-slate-100">{m.baller_name}</p>
-                        <p className="text-[10px] text-slate-500 uppercase font-black">{m.first_name} {m.surname}</p>
-                      </div>
-                      <span className="bg-primary/10 text-primary text-[10px] px-2 py-0.5 rounded font-bold">IN</span>
-                    </div>
-                  ))
-                ) : (
-                  <div className="p-4 text-center text-slate-500 text-sm">
-                    {md?.groups_published ? 'You are not in a group for this matchday.' : 'Groups will appear here after the admin publishes them.'}
-                    <button type="button" onClick={() => navigate('/matchday')} className="block mt-3 text-primary font-semibold hover:underline w-full">Open Matchday</button>
-                  </div>
-                )}
-              </div>
-              <div className="p-4 border-t border-primary/10">
+              ))}
+              <div className="p-3">
                 <button type="button" onClick={() => navigate('/matchday')} className="w-full py-2 text-xs font-bold text-slate-500 hover:text-primary transition-colors uppercase tracking-widest">
                   View All Matchdays
                 </button>
               </div>
             </div>
           </div>
-        </div>
-      </div>
-    </>
+        )}
+      </main>
+
+    </div>
   );
 }

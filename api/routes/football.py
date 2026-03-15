@@ -28,7 +28,7 @@ NO_CACHE_HEADERS = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pra
 # ---------------------------------------------------------------------------
 _sc: dict = {}
 _sc_lock = _threading.Lock()
-_SC_TTL = 300.0  # 5 minutes
+_SC_TTL = 43200.0  # 12 hours — leaderboard stays cached until a matchday ends (which calls _sc_clear)
 
 
 def _sc_get(key: str):
@@ -1503,7 +1503,7 @@ def admin_delete_player(player_id: int, payload: dict = Depends(require_admin)):
 
 
 def _ensure_groups(conn, matchday_id: int):
-    """Create smart groups of 5 players (+ implicit Others) from players who voted.
+    """Create smart groups of 6 (5 players + 1 Others slot) from players who voted.
 
     Algorithm:
     1. Skill-balanced snake draft — players ranked by career goals+assists so the top
@@ -1530,14 +1530,17 @@ def _ensure_groups(conn, matchday_id: int):
     import random
 
     n = len(player_ids)
-    group_size = 5
-    # n_full_groups groups of exactly 5; any remainder goes into one last smaller group
+    group_size = 6  # 5 players + 1 "others" slot per group
+    # n_full_groups groups of exactly 6; any remainder goes into one last smaller group
     n_full_groups = max(1, n // group_size)
     remainder = n % group_size
     n_groups = n_full_groups + (1 if remainder > 0 else 0)
 
-    # ── 1. Skill score (batch: 2 queries instead of 2×N) ──────────────────────
+    import heapq
+
+    # ── 1. Composite skill score (avg_rating primary, goals+assists secondary) ─
     ph = ",".join("?" * n)
+
     g_rows = conn.execute(
         f"SELECT scorer_player_id, COUNT(*) FROM FOOTBALL.fixture_goals "
         f"WHERE scorer_player_id IN ({ph}) GROUP BY scorer_player_id",
@@ -1550,8 +1553,36 @@ def _ensure_groups(conn, matchday_id: int):
     ).fetchall()
     goals_map  = {r[0]: r[1] for r in g_rows}
     assist_map = {r[0]: r[1] for r in a_rows}
-    # goals×2 + assists as skill proxy; ties broken randomly for variety
-    skill = {pid: goals_map.get(pid, 0) * 2 + assist_map.get(pid, 0) for pid in player_ids}
+
+    # Career average rating from fixture_ratings — the truest measure of player quality
+    try:
+        r_rows = conn.execute(
+            f"""
+            SELECT fr.player_id, AVG(fr.rating) AS avg_r
+            FROM FOOTBALL.fixture_ratings fr
+            JOIN FOOTBALL.matchday_fixtures mf ON mf.id = fr.fixture_id
+            WHERE fr.player_id IN ({ph})
+            GROUP BY fr.player_id
+            """,
+            player_ids
+        ).fetchall()
+        rating_map = {r[0]: float(r[1]) for r in r_rows if r[1] is not None}
+    except Exception:
+        rating_map = {}
+
+    # Composite: avg_rating×10 (dominant signal) + goals×2 + assists
+    # Tiny random noise breaks ties so groups vary between matchdays
+    skill = {
+        pid: rating_map.get(pid, 0.0) * 10
+             + goals_map.get(pid, 0) * 2
+             + assist_map.get(pid, 0)
+             + random.uniform(0, 0.1)
+        for pid in player_ids
+    }
+
+    # Sort descending — strongest first
+    ranked = sorted(player_ids, key=lambda p: -skill[p])
+    rank_of = {pid: i for i, pid in enumerate(ranked)}
 
     # ── 2. Pair co-occurrence history (last 8 ended matchdays, recency-weighted) ─
     pair_cost: dict = {}
@@ -1562,7 +1593,7 @@ def _ensure_groups(conn, matchday_id: int):
         [matchday_id]
     ).fetchall()
     for rank, (mid,) in enumerate(past):
-        w = 1.0 / (rank + 1)          # 1.0, 0.5, 0.33, 0.25 …
+        w = 1.0 / (rank + 1)
         gm = conn.execute(
             "SELECT group_id, player_id FROM FOOTBALL.matchday_group_members "
             "WHERE matchday_id = ? AND player_id > 0",
@@ -1577,30 +1608,29 @@ def _ensure_groups(conn, matchday_id: int):
                     key = (min(members[i], members[j]), max(members[i], members[j]))
                     pair_cost[key] = pair_cost.get(key, 0.0) + w
 
-    # ── 3. Snake draft (skill balance) ─────────────────────────────────────────
-    # Sort descending by skill; random tiebreak so new players don't all pile into
-    # the last group.
-    ranked = sorted(player_ids, key=lambda p: (-skill.get(p, 0), random.random()))
-    rank_of = {pid: i for i, pid in enumerate(ranked)}
-
-    # Distribute the first n_full_groups*5 players across n_full_groups full groups via
-    # snake draft.  Any remaining players (< 5) form a last, smaller group.
-    main_pool = ranked[:n_full_groups * group_size]
-    rest_pool = ranked[n_full_groups * group_size:]
-
+    # ── 3. Greedy balanced partition: strongest player → weakest group ──────────
+    # A min-heap of (group_total_skill, group_index) ensures that every time we
+    # assign a player we pick the group that currently needs the most skill added.
+    # Result: each group ends up with one top baller paired with lower-ranked players
+    # — exactly the "strong with weak" balance requested.
     groups: list = [[] for _ in range(n_groups)]
-    for i, pid in enumerate(main_pool):
-        row_num = i // n_full_groups
-        col     = i % n_full_groups
-        if row_num % 2 == 1:            # reverse direction on odd rows
-            col = n_full_groups - 1 - col
-        groups[col].append(pid)
+    heap = [(0.0, i) for i in range(n_full_groups)]
+    heapq.heapify(heap)
+
+    main_pool = ranked[:n_full_groups * group_size]
+    rest_pool = ranked[n_full_groups * group_size:]   # remainder (< group_size)
+
+    for pid in main_pool:
+        total, gi = heapq.heappop(heap)
+        groups[gi].append(pid)
+        heapq.heappush(heap, (total + skill[pid], gi))
     for pid in rest_pool:
         groups[-1].append(pid)
 
     # ── 4. Local search: swap same-tier players to minimise repeat pairings ────
-    # "Same tier" = same snake row → skill balance is preserved exactly.
-    # Only swap among full groups (first n_full_groups); leave the small last group alone.
+    # "Same tier" = players in the same skill band (one per group in ranked order).
+    # Swapping only within a tier keeps group totals balanced while reducing
+    # how often the same two players are paired across consecutive matchdays.
     def grp_cost(grp):
         s = 0.0
         for i in range(len(grp)):
@@ -1608,7 +1638,7 @@ def _ensure_groups(conn, matchday_id: int):
                 s += pair_cost.get((min(grp[i], grp[j]), max(grp[i], grp[j])), 0.0)
         return s
 
-    for _ in range(400):
+    for _ in range(500):
         if n_full_groups < 2:
             break
         gi = random.randrange(n_full_groups)
@@ -1618,7 +1648,7 @@ def _ensure_groups(conn, matchday_id: int):
         ii = random.randrange(len(groups[gi]))
         jj = random.randrange(len(groups[gj]))
         pi, pj = groups[gi][ii], groups[gj][jj]
-        # Only swap within the same skill tier to keep groups balanced
+        # Only swap players in the same skill tier so balance is preserved
         if rank_of[pi] // n_full_groups != rank_of[pj] // n_full_groups:
             continue
         old = grp_cost(groups[gi]) + grp_cost(groups[gj])
@@ -1661,7 +1691,7 @@ def admin_matchday_regenerate_groups(matchday_id: int, payload: dict = Depends(r
     conn.execute("DELETE FROM FOOTBALL.matchday_groups WHERE matchday_id = ?", [matchday_id])
     conn.execute("UPDATE FOOTBALL.matchdays SET groups_published = false WHERE id = ?", [matchday_id])
     _ensure_groups(conn, matchday_id)
-    return {"success": True, "message": "Groups regenerated from voters only (5 players + Others per group). Re-publish when ready."}
+    return {"success": True, "message": "Groups regenerated from voters only (5 players + 1 Others per group). Re-publish when ready."}
 
 
 @router.get("/admin/matchdays/{matchday_id:int}/groups")
@@ -2656,6 +2686,36 @@ def admin_end_matchday(matchday_id: int, payload: dict = Depends(require_admin))
         pass  # Don't fail end-matchday if MOTM computation errors
     _sc_clear()  # stats/leaderboard now include this matchday's results
     return {"success": True, "message": "Matchday ended."}
+
+
+@router.post("/admin/backfill-motm")
+def admin_backfill_motm(payload: dict = Depends(require_admin)):
+    """Backfill Man of the Match for all past ended matchdays that have no MOTM entry."""
+    conn = get_conn()
+    _ensure_motm_table(conn)
+    ended = conn.execute(
+        "SELECT id, sunday_date FROM FOOTBALL.matchdays WHERE matchday_ended = true ORDER BY sunday_date"
+    ).fetchall()
+    filled, skipped = 0, 0
+    for (mid, sunday_date) in ended:
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM FOOTBALL.matchday_motm WHERE matchday_id = ?", [mid]
+        ).fetchone()[0]
+        if existing:
+            skipped += 1
+            continue
+        try:
+            motm_pid = _compute_motm(conn, mid)
+            if motm_pid:
+                conn.execute(
+                    "INSERT INTO FOOTBALL.matchday_motm (matchday_id, player_id, sunday_date) VALUES (?, ?, ?)",
+                    [mid, motm_pid, sunday_date]
+                )
+                filled += 1
+        except Exception:
+            pass
+    _sc_clear()
+    return {"success": True, "filled": filled, "skipped_already_set": skipped, "total": len(ended)}
 
 
 @router.post("/admin/matchdays/{matchday_id:int}/reopen-matchday")

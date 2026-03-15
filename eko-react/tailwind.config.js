@@ -11,6 +11,8 @@ export default {
         primary: "#0ac247",
         "background-light": "#f5f8f6",
         "background-dark": "#102216",
+        "card-dark": "#0d1117",
+        "border-dark": "#1e2433",
       },
       fontFamily: {
         display: ["Lexend", "sans-serif"],
