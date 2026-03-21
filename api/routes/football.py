@@ -519,16 +519,19 @@ def admin_approved(payload: dict = Depends(require_admin)):
             pass
     year = datetime.utcnow().year
     q = get_current_quarter()
+    _ensure_avatar_columns(conn)
     rows = conn.execute("""
         SELECT p.id, p.first_name, p.surname, p.baller_name, p.jersey_number, p.email, p.whatsapp_phone,
                COALESCE(p.password_display, '') as password_display,
                COALESCE(p.suspended, false) as suspended,
-               p.approved_at
+               p.approved_at,
+               COALESCE(p.avatar_access, false) as avatar_access,
+               COALESCE(p.avatar_locked, false) as avatar_locked
         FROM FOOTBALL.players p
         WHERE p.status = 'approved'
         ORDER BY p.baller_name
     """).fetchall()
-    cols = ["id", "first_name", "surname", "baller_name", "jersey_number", "email", "whatsapp_phone", "password_display", "suspended", "approved_at"]
+    cols = ["id", "first_name", "surname", "baller_name", "jersey_number", "email", "whatsapp_phone", "password_display", "suspended", "approved_at", "avatar_access", "avatar_locked"]
     members = [dict(zip(cols, r)) for r in rows]
     for m in members:
         dues_row = conn.execute("""
@@ -2281,6 +2284,242 @@ def member_change_password(body: ChangePasswordRequest, payload: dict = Depends(
         [new_hash, body.new_password, player_id],
     )
     return {"success": True, "message": "Password changed. Please log in again with your new password."}
+
+
+# ---------------------------------------------------------------------------
+# Avatar generation (Together AI FLUX — free tier)
+# ---------------------------------------------------------------------------
+
+class AvatarGenRequest(BaseModel):
+    skin_tone: str = "edb98a"       # DiceBear skin hex
+    hair_style: str = "short1"      # DiceBear head id
+    face: str = "smile"             # DiceBear face id
+    accessory: str = "none"
+    beard: str = "none"
+    tattoo: str = "none"
+    player_name: str = ""
+    jersey_number: str = ""
+    team_name: str = ""
+    jersey_color: str = "#0ac247"   # hex
+
+
+_SKIN_LABELS = {
+    "ffdbb4": "light skin",
+    "edb98a": "medium brown skin",
+    "d08b5b": "brown skin",
+    "ae5d29": "dark brown skin",
+    "694d3d": "very dark brown skin",
+}
+_HAIR_LABELS = {
+    "noHair1": "bald head, completely shaved",
+    "shaved1": "close-shaved fade haircut",
+    "short1": "short neat hair",
+    "short3": "short wavy hair",
+    "afro": "natural afro",
+    "longAfro": "large rounded afro",
+    "mohawk": "mohawk haircut",
+    "flatTop": "flat top haircut",
+    "cornrows": "cornrow braids",
+    "dreads1": "long dreadlocks",
+    "twists": "hair twists",
+    "bantuKnots": "bantu knots",
+    "bun": "hair tied in a bun",
+    "medium1": "medium length natural hair",
+    "long": "long straight hair",
+}
+_FACE_LABELS = {
+    "smile": "warm smile",
+    "smileBig": "big confident smile showing teeth",
+    "calm": "calm neutral expression",
+    "serious": "serious determined look",
+    "driven": "intense focused game face",
+    "cheeky": "cheeky grin",
+    "solemn": "stoic solemn expression",
+    "suspicious": "sly knowing smirk",
+}
+_BEARD_LABELS = {
+    "none": "",
+    "stubble": "light beard stubble",
+    "goatee": "neat goatee beard",
+    "chinstrap": "chinstrap beard",
+    "full": "full beard",
+    "thick": "thick full beard",
+    "long_beard": "long flowing beard",
+}
+_TATTOO_LABELS = {
+    "none": "",
+    "left_sleeve": "detailed tattoo sleeve covering the left arm",
+    "both_sleeves": "tattoo sleeves on both arms",
+    "neck": "neck tattoo",
+    "chest": "chest tattoo visible at jersey collar",
+    "hand": "hand and knuckle tattoos",
+}
+
+
+def _ensure_avatar_columns(conn):
+    """Add avatar_access and avatar_locked columns if they don't exist yet."""
+    try:
+        conn.execute("ALTER TABLE FOOTBALL.players ADD COLUMN IF NOT EXISTS avatar_access BOOLEAN DEFAULT FALSE")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE FOOTBALL.players ADD COLUMN IF NOT EXISTS avatar_locked BOOLEAN DEFAULT FALSE")
+    except Exception:
+        pass
+
+
+@router.get("/member/avatar-status")
+def member_avatar_status(payload: dict = Depends(require_player)):
+    """Return this member's avatar access and lock state."""
+    conn = get_conn()
+    _ensure_avatar_columns(conn)
+    player_id = int(payload["sub"])
+    row = conn.execute(
+        "SELECT COALESCE(avatar_access, false), COALESCE(avatar_locked, false) FROM FOOTBALL.players WHERE id = ?",
+        [player_id],
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Player not found.")
+    return {"avatar_access": bool(row[0]), "avatar_locked": bool(row[1])}
+
+
+@router.post("/member/avatar/lock")
+def member_lock_avatar(payload: dict = Depends(require_player)):
+    """Called when a member saves their avatar — marks it as locked."""
+    conn = get_conn()
+    _ensure_avatar_columns(conn)
+    player_id = int(payload["sub"])
+    row = conn.execute(
+        "SELECT COALESCE(avatar_access, false) FROM FOOTBALL.players WHERE id = ?",
+        [player_id],
+    ).fetchone()
+    if not row or not row[0]:
+        raise HTTPException(status_code=403, detail="No avatar access.")
+    conn.execute(
+        "UPDATE FOOTBALL.players SET avatar_locked = true WHERE id = ?",
+        [player_id],
+    )
+    return {"success": True}
+
+
+@router.post("/admin/players/{player_id:int}/avatar-access")
+def admin_avatar_access(player_id: int, payload: dict = Depends(require_admin)):
+    """Grant avatar access to a player."""
+    conn = get_conn()
+    _ensure_avatar_columns(conn)
+    conn.execute(
+        "UPDATE FOOTBALL.players SET avatar_access = true, avatar_locked = false WHERE id = ?",
+        [player_id],
+    )
+    return {"success": True, "message": "Avatar access granted and lock reset."}
+
+
+@router.delete("/admin/players/{player_id:int}/avatar-access")
+def admin_revoke_avatar_access(player_id: int, payload: dict = Depends(require_admin)):
+    """Revoke avatar access from a player."""
+    conn = get_conn()
+    _ensure_avatar_columns(conn)
+    conn.execute(
+        "UPDATE FOOTBALL.players SET avatar_access = false WHERE id = ?",
+        [player_id],
+    )
+    return {"success": True, "message": "Avatar access revoked."}
+
+
+@router.post("/admin/players/{player_id:int}/avatar-reset")
+def admin_reset_avatar_lock(player_id: int, payload: dict = Depends(require_admin)):
+    """Reset avatar lock so a player can regenerate (keeps access granted)."""
+    conn = get_conn()
+    _ensure_avatar_columns(conn)
+    conn.execute(
+        "UPDATE FOOTBALL.players SET avatar_locked = false WHERE id = ?",
+        [player_id],
+    )
+    return {"success": True, "message": "Avatar lock reset. Player can now regenerate."}
+
+
+@router.post("/member/generate-avatar")
+async def generate_avatar(body: AvatarGenRequest, payload: dict = Depends(require_player)):
+    """Generate a FIFA-card-style illustration using Together AI FLUX (free tier)."""
+    import httpx
+
+    conn = get_conn()
+    _ensure_avatar_columns(conn)
+    player_id = int(payload["sub"])
+    row = conn.execute(
+        "SELECT COALESCE(avatar_access, false), COALESCE(avatar_locked, false) FROM FOOTBALL.players WHERE id = ?",
+        [player_id],
+    ).fetchone()
+    if not row or not row[0]:
+        raise HTTPException(status_code=403, detail="You don't have avatar access yet. Contact your admin to request it.")
+    if row[1]:
+        raise HTTPException(status_code=403, detail="Your avatar is locked. Contact your admin to reset it.")
+
+    api_key = os.getenv("TOGETHER_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Avatar generation not configured. Ask your admin to set TOGETHER_API_KEY.")
+
+    skin   = _SKIN_LABELS.get(body.skin_tone, "brown skin")
+    hair   = _HAIR_LABELS.get(body.hair_style, "short hair")
+    expr   = _FACE_LABELS.get(body.face, "confident expression")
+    beard  = _BEARD_LABELS.get(body.beard, "")
+    tattoo = _TATTOO_LABELS.get(body.tattoo, "")
+    acc    = "" if body.accessory == "none" else body.accessory.replace("glasses2", "stylish glasses").replace("sunglasses2", "dark sunglasses")
+    color  = body.jersey_color.lstrip("#")
+    team   = body.team_name or "football"
+    num    = body.jersey_number or ""
+
+    # Build optional detail string
+    extras = ", ".join(filter(None, [beard, tattoo, acc]))
+
+    prompt = (
+        f"Anime cartoon illustration of a young {skin} male football player, "
+        f"{hair}, {expr}, arms folded across chest confidently"
+        f"{', ' + extras if extras else ''}, "
+        f"wearing a #{color} coloured {team} football jersey"
+        f"{' with number ' + num + ' on chest' if num else ''}, "
+        f"upper body portrait, FIFA Ultimate Team card art style, "
+        f"clean cel-shading, vibrant colours, professional sports card illustration, "
+        f"sharp linework, dynamic lighting, 4k quality, no background"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://api.together.xyz/v1/images/generations",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "black-forest-labs/FLUX.1-schnell",
+                    "prompt": prompt,
+                    "width": 512,
+                    "height": 768,
+                    "steps": 4,
+                    "n": 1,
+                    "response_format": "b64_json",
+                },
+            )
+        if resp.status_code != 200:
+            logger.error("Together AI error %s: %s", resp.status_code, resp.text[:400])
+            raise HTTPException(status_code=502, detail="Image generation failed. Try again.")
+
+        data = resp.json()
+        b64 = data.get("data", [{}])[0].get("b64_json") or ""
+        if not b64:
+            # Some responses return url instead
+            url = data.get("data", [{}])[0].get("url", "")
+            if url:
+                return {"success": True, "image_url": url}
+            raise HTTPException(status_code=502, detail="No image returned.")
+
+        return {"success": True, "image_b64": b64}
+
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Generation timed out — try again.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Avatar generation error: %s", e)
+        raise HTTPException(status_code=500, detail="Avatar generation error.")
 
 
 @router.post("/admin/matchdays/{matchday_id:int}/groups/publish")

@@ -55,6 +55,9 @@ import {
   reopenMatchday,
   getMatchdayTable,
   getMatchdayPlayerRatings,
+  adminGrantAvatarAccess,
+  adminRevokeAvatarAccess,
+  adminResetAvatarLock,
 } from '../api';
 import './Admin.css';
 
@@ -487,6 +490,32 @@ export default function Admin() {
     }
   };
 
+  const handleAvatarAccess = async (playerId, grant) => {
+    const token = getAdminToken();
+    if (!token) return;
+    try {
+      if (grant) await adminGrantAvatarAccess(token, playerId);
+      else await adminRevokeAvatarAccess(token, playerId);
+      showToast(grant ? 'Avatar access granted.' : 'Avatar access revoked.');
+      fetchApproved();
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed.');
+    }
+  };
+
+  const handleAvatarReset = async (playerId, ballerName) => {
+    if (!window.confirm(`Reset avatar lock for "${ballerName}"? They can regenerate their avatar once.`)) return;
+    const token = getAdminToken();
+    if (!token) return;
+    try {
+      await adminResetAvatarLock(token, playerId);
+      showToast('Avatar lock reset.');
+      fetchApproved();
+    } catch (err) {
+      showToast(err.response?.data?.detail || 'Failed.');
+    }
+  };
+
   const handleMoveMember = async () => {
     if (moveFrom == null || moveTo == null || movePlayerId == null || !selectedMatchdayId) return;
     const token = getAdminToken();
@@ -815,6 +844,22 @@ export default function Admin() {
                               <button type="button" className="py-1.5 px-3 bg-slate-700 text-slate-200 font-semibold rounded-lg text-sm hover:bg-slate-600" onClick={() => handleSuspend(m.id)}>Suspend</button>
                             )}
                             <button type="button" className="py-1.5 px-3 bg-red-500/20 text-red-400 font-semibold rounded-lg text-sm hover:bg-red-500/30 border border-red-500/40" onClick={() => handleDeletePlayer(m.id, m.baller_name)}>Delete</button>
+                            {/* Avatar access */}
+                            {m.avatar_access ? (
+                              <button type="button" className="py-1.5 px-3 bg-purple-500/20 text-purple-300 font-semibold rounded-lg text-sm hover:bg-purple-500/30 border border-purple-500/40" onClick={() => handleAvatarAccess(m.id, false)} title="Revoke avatar access">
+                                🎨 Revoke Avatar
+                              </button>
+                            ) : (
+                              <button type="button" className="py-1.5 px-3 bg-slate-700 text-slate-300 font-semibold rounded-lg text-sm hover:bg-slate-600 border border-slate-500" onClick={() => handleAvatarAccess(m.id, true)} title="Grant avatar access">
+                                🎨 Grant Avatar
+                              </button>
+                            )}
+                            {/* Reset lock if they've already saved and want to redo */}
+                            {m.avatar_locked && (
+                              <button type="button" className="py-1.5 px-3 bg-amber-500/20 text-amber-300 font-semibold rounded-lg text-sm hover:bg-amber-500/30 border border-amber-500/40" onClick={() => handleAvatarReset(m.id, m.baller_name)} title="Allow member to regenerate avatar">
+                                🔓 Reset Lock
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))}

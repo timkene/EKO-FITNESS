@@ -484,6 +484,36 @@ export async function changeMemberPassword(token, data) {
   return res.data;
 }
 
+export async function getMemberAvatarStatus(token) {
+  const res = await footballApi.get('/member/avatar-status', { headers: { Authorization: `Bearer ${token}` } });
+  return res.data;
+}
+
+export async function lockMemberAvatar(token) {
+  const res = await footballApi.post('/member/avatar/lock', {}, { headers: { Authorization: `Bearer ${token}` } });
+  return res.data;
+}
+
+export async function adminGrantAvatarAccess(token, playerId) {
+  const res = await footballApi.post(`/admin/players/${playerId}/avatar-access`, {}, { headers: { Authorization: `Bearer ${token}` } });
+  return res.data;
+}
+
+export async function adminRevokeAvatarAccess(token, playerId) {
+  const res = await footballApi.delete(`/admin/players/${playerId}/avatar-access`, { headers: { Authorization: `Bearer ${token}` } });
+  return res.data;
+}
+
+export async function adminResetAvatarLock(token, playerId) {
+  const res = await footballApi.post(`/admin/players/${playerId}/avatar-reset`, {}, { headers: { Authorization: `Bearer ${token}` } });
+  return res.data;
+}
+
+export async function generateMemberAvatar(token, config) {
+  const res = await footballApi.post('/member/generate-avatar', config, { headers: { Authorization: `Bearer ${token}` }, timeout: 90000 });
+  return res.data;
+}
+
 export function getMemberTopThreeBallers(token) {
   return cachedFetch(`topthree:${token}`, () =>
     footballApi.get(`/member/top-three-ballers?_t=${Date.now()}`, { headers: memberNoCacheHeaders(token), timeout: 90000 }).then(r => r.data)
