@@ -175,7 +175,18 @@ export default function AvatarBuilder() {
   useEffect(() => {
     if (!token) return;
     getMemberAvatarStatus(token)
-      .then(d => { setAvatarAccess(d.avatar_access); setAvatarLocked(d.avatar_locked); })
+      .then(d => {
+        setAvatarAccess(d.avatar_access);
+        setAvatarLocked(d.avatar_locked);
+        // If locked but server has no URL (saved before cross-device fix),
+        // silently re-sync the local aiImage URL to the server now.
+        if (d.avatar_locked && !d.avatar_url) {
+          const local = getSavedAvatar();
+          if (local?.aiImage) {
+            lockMemberAvatar(token, local.aiImage).catch(() => {});
+          }
+        }
+      })
       .catch(() => { setAvatarAccess(false); });
   }, [token]);
 

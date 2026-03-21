@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { getPlayerAuth } from './Login';
-import { getMemberDues, submitPaymentEvidence, applyWaiver, listMemberMatchdays, getMemberMatchday, voteMatchday, getMemberStats, getMemberTopThreeBallers, invalidateStatsCache } from '../api';
+import { getMemberDues, submitPaymentEvidence, applyWaiver, listMemberMatchdays, getMemberMatchday, voteMatchday, getMemberStats, getMemberTopThreeBallers, invalidateStatsCache, getMemberAvatarStatus } from '../api';
 import JerseyAvatar from '../components/JerseyAvatar';
 import { useToast } from '../components/Toast';
 import { TopFiveSkeleton } from '../components/Skeleton';
@@ -48,6 +48,7 @@ export default function Dashboard() {
   const [topThreeLoading, setTopThreeLoading] = useState(true);
   const [heroKitImageUrl, setHeroKitImageUrl] = useState(null);
   const [heroFanartUrl, setHeroFanartUrl] = useState(null);
+  const [serverAvatarUrl, setServerAvatarUrl] = useState(null);
   const fileInputRef = useRef(null);
 
   // Fetch real kit photo + team fanart for hero
@@ -58,6 +59,14 @@ export default function Dashboard() {
     fetchKitImage(saved.sportsDbId, kitLabel).then(url => setHeroKitImageUrl(url || null));
     fetchTeamFanart(saved.sportsDbId).then(url => setHeroFanartUrl(url || null));
   }, []);
+
+  // Fetch avatar URL directly from server (works cross-device)
+  useEffect(() => {
+    if (!token) return;
+    getMemberAvatarStatus(token)
+      .then(d => { if (d.avatar_url) setServerAvatarUrl(d.avatar_url); })
+      .catch(() => {});
+  }, [token]);
 
   useEffect(() => {
     if (!token) return;
@@ -170,7 +179,7 @@ export default function Dashboard() {
   const savedJersey = getSavedJersey();
   // Prefer server-stored avatar URL (works across devices); fall back to localStorage
   const savedAvatar = getSavedAvatar();
-  const avatarUrl = memberStats?.avatar_url || savedAvatar?.aiImage || null;
+  const avatarUrl = serverAvatarUrl || memberStats?.avatar_url || savedAvatar?.aiImage || null;
 
   return (
     <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen flex flex-col font-display">
