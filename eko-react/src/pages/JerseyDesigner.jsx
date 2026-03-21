@@ -23,11 +23,11 @@ const LEAGUES = [
 const TEAMS = {
   epl: [
     { id:'arsenal',   name:'Arsenal',    sportsDbId:'133604', kits:{ home:{main:'#EF0107',sleeve:'#FFFFFF',collar:'#FFFFFF',brand:'adidas',collarStyle:'crew',pattern:null},         away:{main:'#FFFFFF',sleeve:'#FFFFFF',collar:'#EF0107',brand:'adidas',collarStyle:'crew',pattern:null},      third:{main:'#063672',sleeve:'#063672',collar:'#EF0107',brand:'adidas',collarStyle:'v',pattern:null} }},
-    { id:'mancity',   name:'Man City',   sportsDbId:'133615', kits:{ home:{main:'#6CABDD',sleeve:'#6CABDD',collar:'#FFFFFF',brand:'puma',collarStyle:'v',pattern:null},               away:{main:'#FFFFFF',sleeve:'#FFFFFF',collar:'#6CABDD',brand:'puma',collarStyle:'crew',pattern:null},       third:{main:'#1C2C5B',sleeve:'#1C2C5B',collar:'#6CABDD',brand:'puma',collarStyle:'crew',pattern:null} }},
+    { id:'mancity',   name:'Man City',   sportsDbId:'133613', kits:{ home:{main:'#6CABDD',sleeve:'#6CABDD',collar:'#FFFFFF',brand:'puma',collarStyle:'v',pattern:null},               away:{main:'#FFFFFF',sleeve:'#FFFFFF',collar:'#6CABDD',brand:'puma',collarStyle:'crew',pattern:null},       third:{main:'#1C2C5B',sleeve:'#1C2C5B',collar:'#6CABDD',brand:'puma',collarStyle:'crew',pattern:null} }},
     { id:'liverpool', name:'Liverpool',  sportsDbId:'133602', kits:{ home:{main:'#C8102E',sleeve:'#C8102E',collar:'#00B2A9',brand:'nike',collarStyle:'crew',pattern:null},             away:{main:'#F6EB61',sleeve:'#F6EB61',collar:'#C8102E',brand:'nike',collarStyle:'v',pattern:null},          third:{main:'#00B2A9',sleeve:'#00B2A9',collar:'#C8102E',brand:'nike',collarStyle:'crew',pattern:null} }},
     { id:'chelsea',   name:'Chelsea',    sportsDbId:'133610', kits:{ home:{main:'#034694',sleeve:'#034694',collar:'#FFFFFF',brand:'nike',collarStyle:'crew',pattern:null},             away:{main:'#F5F5F5',sleeve:'#F5F5F5',collar:'#034694',brand:'nike',collarStyle:'crew',pattern:null},        third:{main:'#1A1A2E',sleeve:'#1A1A2E',collar:'#034694',brand:'nike',collarStyle:'crew',pattern:null} }},
-    { id:'united',    name:'Man United', sportsDbId:'133616', kits:{ home:{main:'#DA291C',sleeve:'#000000',collar:'#FFE600',brand:'adidas',collarStyle:'crew',pattern:null},           away:{main:'#FFFFFF',sleeve:'#FFFFFF',collar:'#DA291C',brand:'adidas',collarStyle:'v',pattern:null},         third:{main:'#00ABE8',sleeve:'#00ABE8',collar:'#DA291C',brand:'adidas',collarStyle:'crew',pattern:null} }},
-    { id:'spurs',     name:'Tottenham',  sportsDbId:'133612', kits:{ home:{main:'#FFFFFF',sleeve:'#001C58',collar:'#001C58',brand:'nike',collarStyle:'crew',pattern:null},             away:{main:'#001C58',sleeve:'#001C58',collar:'#FFFFFF',brand:'nike',collarStyle:'crew',pattern:null},         third:{main:'#E11E20',sleeve:'#E11E20',collar:'#FFFFFF',brand:'nike',collarStyle:'crew',pattern:null} }},
+    { id:'united',    name:'Man United', sportsDbId:'133612', kits:{ home:{main:'#DA291C',sleeve:'#000000',collar:'#FFE600',brand:'adidas',collarStyle:'crew',pattern:null},           away:{main:'#FFFFFF',sleeve:'#FFFFFF',collar:'#DA291C',brand:'adidas',collarStyle:'v',pattern:null},         third:{main:'#00ABE8',sleeve:'#00ABE8',collar:'#DA291C',brand:'adidas',collarStyle:'crew',pattern:null} }},
+    { id:'spurs',     name:'Tottenham',  sportsDbId:'133616', kits:{ home:{main:'#FFFFFF',sleeve:'#001C58',collar:'#001C58',brand:'nike',collarStyle:'crew',pattern:null},             away:{main:'#001C58',sleeve:'#001C58',collar:'#FFFFFF',brand:'nike',collarStyle:'crew',pattern:null},         third:{main:'#E11E20',sleeve:'#E11E20',collar:'#FFFFFF',brand:'nike',collarStyle:'crew',pattern:null} }},
   ],
   laliga: [
     { id:'realmadrid',name:'Real Madrid', sportsDbId:'133738', kits:{ home:{main:'#FFFFFF',sleeve:'#FFFFFF',collar:'#F0BC42',brand:'adidas',collarStyle:'crew',pattern:null},          away:{main:'#7B3F8C',sleeve:'#7B3F8C',collar:'#F0BC42',brand:'adidas',collarStyle:'v',pattern:null},          third:{main:'#1E1E1E',sleeve:'#1E1E1E',collar:'#FFFFFF',brand:'adidas',collarStyle:'crew',pattern:null} }},
@@ -314,12 +314,14 @@ export default function JerseyDesigner() {
   // Fetch real kit image when team or kit type changes
   useEffect(() => {
     if (!team?.sportsDbId) return;
+    let isCurrent = true;
     const kitLabel = { home: 'Home', away: 'Away', third: 'Third' }[kitType] || 'Home';
     setKitImageLoading(true);
     setKitImageUrl(null);
     fetchKitImage(team.sportsDbId, kitLabel)
-      .then(url => { setKitImageUrl(url); setKitImageLoading(false); })
-      .catch(() => setKitImageLoading(false));
+      .then(url => { if (isCurrent) { setKitImageUrl(url); setKitImageLoading(false); } })
+      .catch(() => { if (isCurrent) setKitImageLoading(false); });
+    return () => { isCurrent = false; };
   }, [team?.sportsDbId, kitType]);
 
   const handleSave = () => {
