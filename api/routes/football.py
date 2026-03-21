@@ -2039,7 +2039,10 @@ def member_my_stats(payload: dict = Depends(require_player)):
                 rank = i
                 star_rating = row.get("star_rating", 0)
                 break
-        result = {"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating}
+        _ensure_avatar_columns(conn)
+        av_row = conn.execute("SELECT avatar_url FROM FOOTBALL.players WHERE id = ?", [player_id]).fetchone()
+        result = {"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating,
+                  "avatar_url": (av_row[0] if av_row else None) or ""}
         _sc_set(cache_key, result)
         return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
 
@@ -2098,7 +2101,10 @@ def member_my_stats(payload: dict = Depends(require_player)):
             break
     if my_stats is None:
         my_stats = _player_career_stats(conn, player_id, cache)
-    result = {"success": True, "stats": my_stats, "global_rank": rank, "star_rating": star_rating}
+    _ensure_avatar_columns(conn)
+    av_row = conn.execute("SELECT avatar_url FROM FOOTBALL.players WHERE id = ?", [player_id]).fetchone()
+    result = {"success": True, "stats": my_stats, "global_rank": rank, "star_rating": star_rating,
+              "avatar_url": (av_row[0] if av_row else None) or ""}
     _sc_set(cache_key, result)
     return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
 
@@ -2357,15 +2363,16 @@ _TATTOO_LABELS = {
 
 
 def _ensure_avatar_columns(conn):
-    """Add avatar_access and avatar_locked columns if they don't exist yet."""
-    try:
-        conn.execute("ALTER TABLE FOOTBALL.players ADD COLUMN IF NOT EXISTS avatar_access BOOLEAN DEFAULT FALSE")
-    except Exception:
-        pass
-    try:
-        conn.execute("ALTER TABLE FOOTBALL.players ADD COLUMN IF NOT EXISTS avatar_locked BOOLEAN DEFAULT FALSE")
-    except Exception:
-        pass
+    """Add avatar_access, avatar_locked, and avatar_url columns if they don't exist yet."""
+    for ddl in [
+        "ALTER TABLE FOOTBALL.players ADD COLUMN IF NOT EXISTS avatar_access BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE FOOTBALL.players ADD COLUMN IF NOT EXISTS avatar_locked BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE FOOTBALL.players ADD COLUMN IF NOT EXISTS avatar_url VARCHAR",
+    ]:
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass
 
 
 @router.get("/member/avatar-status")
@@ -2375,17 +2382,20 @@ def member_avatar_status(payload: dict = Depends(require_player)):
     _ensure_avatar_columns(conn)
     player_id = int(payload["sub"])
     row = conn.execute(
-        "SELECT COALESCE(avatar_access, false), COALESCE(avatar_locked, false) FROM FOOTBALL.players WHERE id = ?",
+        "SELECT COALESCE(avatar_access, false), COALESCE(avatar_locked, false), avatar_url FROM FOOTBALL.players WHERE id = ?",
         [player_id],
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Player not found.")
-    return {"avatar_access": bool(row[0]), "avatar_locked": bool(row[1])}
+    return {"avatar_access": bool(row[0]), "avatar_locked": bool(row[1]), "avatar_url": row[2] or ""}
 
+
+class AvatarLockBody(BaseModel):
+    avatar_url: str = ""
 
 @router.post("/member/avatar/lock")
-def member_lock_avatar(payload: dict = Depends(require_player)):
-    """Called when a member saves their avatar — marks it as locked."""
+def member_lock_avatar(body: AvatarLockBody, payload: dict = Depends(require_player)):
+    """Called when a member saves their avatar — stores URL and marks it as locked."""
     conn = get_conn()
     _ensure_avatar_columns(conn)
     player_id = int(payload["sub"])
@@ -2396,8 +2406,8 @@ def member_lock_avatar(payload: dict = Depends(require_player)):
     if not row or not row[0]:
         raise HTTPException(status_code=403, detail="No avatar access.")
     conn.execute(
-        "UPDATE FOOTBALL.players SET avatar_locked = true WHERE id = ?",
-        [player_id],
+        "UPDATE FOOTBALL.players SET avatar_locked = true, avatar_url = ? WHERE id = ?",
+        [body.avatar_url, player_id],
     )
     return {"success": True}
 

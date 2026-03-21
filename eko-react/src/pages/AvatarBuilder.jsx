@@ -225,8 +225,8 @@ export default function AvatarBuilder() {
 
   const handleSave = async () => {
     localStorage.setItem(AVATAR_KEY, JSON.stringify({ ...cfg, seed, aiImage }));
-    // Lock server-side so they can't regenerate
-    try { await lockMemberAvatar(token); setAvatarLocked(true); } catch { /* non-fatal */ }
+    // Lock server-side and persist the URL so other devices can load it
+    try { await lockMemberAvatar(token, aiImage || ''); setAvatarLocked(true); } catch { /* non-fatal */ }
     setSavedMsg(true);
     setTimeout(() => setSavedMsg(false), 2200);
   };

@@ -168,7 +168,9 @@ export default function Dashboard() {
   const level = stats?.matchdays_present ?? 0;
   const recentMatchdays = matchdays.filter(m => m.matchday_ended).slice(0, 3);
   const savedJersey = getSavedJersey();
+  // Prefer server-stored avatar URL (works across devices); fall back to localStorage
   const savedAvatar = getSavedAvatar();
+  const avatarUrl = memberStats?.avatar_url || savedAvatar?.aiImage || null;
 
   return (
     <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen flex flex-col font-display">
@@ -237,8 +239,11 @@ export default function Dashboard() {
                     </span>
                   </div>
                 )}
-                {savedAvatar ? (
-                  /* Avatar mode — player wears their jersey */
+                {avatarUrl ? (
+                  /* AI-generated avatar — cross-device via server URL */
+                  <img src={avatarUrl} alt="Player avatar" className="w-48 h-48 object-contain drop-shadow-2xl rounded-xl" />
+                ) : savedAvatar ? (
+                  /* Fallback: DiceBear SVG preview (localStorage only) */
                   <AvatarSVG
                     config={{
                       ...savedAvatar,

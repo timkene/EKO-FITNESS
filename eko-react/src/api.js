@@ -489,8 +489,8 @@ export async function getMemberAvatarStatus(token) {
   return res.data;
 }
 
-export async function lockMemberAvatar(token) {
-  const res = await footballApi.post('/member/avatar/lock', {}, { headers: { Authorization: `Bearer ${token}` } });
+export async function lockMemberAvatar(token, avatarUrl = '') {
+  const res = await footballApi.post('/member/avatar/lock', { avatar_url: avatarUrl }, { headers: { Authorization: `Bearer ${token}` } });
   return res.data;
 }
 
