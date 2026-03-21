@@ -90,6 +90,7 @@ export default function MemberLayout() {
           { to: '/leaderboard',icon: 'leaderboard',    label: 'Leaderboard' },
           { to: '/rules',     icon: 'rule',             label: 'Rules' },
           { to: '/jersey',    icon: 'checkroom',        label: 'My Jersey' },
+          { to: '/avatar',    icon: 'face',             label: 'My Avatar' },
           { to: '/profile',   icon: 'manage_accounts',  label: 'My Profile' },
         ].map(({ to, icon, label }) => (
           <NavLink

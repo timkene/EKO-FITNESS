@@ -8,6 +8,7 @@ import Leaderboard from './pages/Leaderboard';
 import Rules from './pages/Rules';
 import Profile from './pages/Profile';
 import JerseyDesigner from './pages/JerseyDesigner';
+import AvatarBuilder from './pages/AvatarBuilder';
 import Admin from './pages/Admin';
 import { ToastProvider } from './components/Toast';
 import './App.css';
@@ -27,6 +28,7 @@ function App() {
           <Route path="/rules" element={<Rules />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/jersey" element={<JerseyDesigner />} />
+          <Route path="/avatar" element={<AvatarBuilder />} />
         </Route>
         <Route path="/admin" element={<Admin />} />
         <Route path="*" element={<Navigate to="/login" replace />} />

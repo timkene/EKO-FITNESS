@@ -6,6 +6,7 @@ import JerseyAvatar from '../components/JerseyAvatar';
 import { useToast } from '../components/Toast';
 import { TopFiveSkeleton } from '../components/Skeleton';
 import { getSavedJersey, JerseySVG, fetchKitImage, fetchTeamFanart, FULL_TEAM_NAMES } from './JerseyDesigner';
+import { getSavedAvatar, AvatarSVG, SKIN_TONES, HAIR_COLORS } from './AvatarBuilder';
 import './Dashboard.css';
 
 function useCountdown(sundayDateStr) {
@@ -167,6 +168,7 @@ export default function Dashboard() {
   const level = stats?.matchdays_present ?? 0;
   const recentMatchdays = matchdays.filter(m => m.matchday_ended).slice(0, 3);
   const savedJersey = getSavedJersey();
+  const savedAvatar = getSavedAvatar();
 
   return (
     <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen flex flex-col font-display">
@@ -219,7 +221,7 @@ export default function Dashboard() {
             {/* Content: left jersey + right stats */}
             <div className="relative z-10 flex" style={{ minHeight: '380px' }}>
 
-              {/* Left: club name + jersey (centered) */}
+              {/* Left: avatar or jersey (centered) */}
               <div className="flex-1 flex flex-col items-center justify-center text-center px-4 pt-10 pb-14">
                 {savedJersey?.teamId && (
                   <div className="mb-2">
@@ -235,7 +237,20 @@ export default function Dashboard() {
                     </span>
                   </div>
                 )}
-                {savedJersey?.kit ? (
+                {savedAvatar ? (
+                  /* Avatar mode — player wears their jersey */
+                  <AvatarSVG
+                    config={{
+                      ...savedAvatar,
+                      skinTone:  SKIN_TONES.find(t => t.id === savedAvatar.skinTone)?.color  || '#C68642',
+                      hairColor: HAIR_COLORS.find(h => h.id === savedAvatar.hairColor)?.color || '#1a1010',
+                    }}
+                    kit={savedJersey?.kit}
+                    playerName={savedJersey?.playerName || playerName}
+                    playerNumber={savedJersey?.playerNumber || ''}
+                    size={200}
+                  />
+                ) : savedJersey?.kit ? (
                   heroKitImageUrl ? (
                     <>
                       {(savedJersey.playerName || savedJersey.playerNumber) && (
