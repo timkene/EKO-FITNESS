@@ -175,6 +175,27 @@ export async function rejectPayment(evidenceId, token) {
   return res.data;
 }
 
+export async function getWaiverPending(token) {
+  const res = await footballApi.get('/admin/waiver-pending', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return res.data;
+}
+
+export async function approveWaiver(playerId, token) {
+  const res = await footballApi.post(`/admin/approve-waiver/${playerId}`, null, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return res.data;
+}
+
+export async function rejectWaiver(playerId, token) {
+  const res = await footballApi.post(`/admin/reject-waiver/${playerId}`, null, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return res.data;
+}
+
 // ---------------------------------------------------------------------------
 // Member – dues & waiver
 // ---------------------------------------------------------------------------

@@ -58,6 +58,9 @@ import {
   adminGrantAvatarAccess,
   adminRevokeAvatarAccess,
   adminResetAvatarLock,
+  getWaiverPending,
+  approveWaiver,
+  rejectWaiver,
 } from '../api';
 import './Admin.css';
 
@@ -87,7 +90,7 @@ export default function Admin() {
   const [showPassword, setShowPassword] = useState(true);
   const [loginError, setLoginError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [tab, setTab] = useState('pending'); // 'pending' | 'approved' | 'evidence' | 'dues' | 'matchday'
+  const [tab, setTab] = useState('pending'); // 'pending' | 'approved' | 'evidence' | 'dues' | 'matchday' | 'waiver'
   const [pending, setPending] = useState([]);
   const [approved, setApproved] = useState([]);
   const [currentYear, setCurrentYear] = useState(new Date().getFullYear());
@@ -97,6 +100,7 @@ export default function Admin() {
   const [duesMembers, setDuesMembers] = useState([]);
   const [loadingDues, setLoadingDues] = useState(false);
   const [paymentEvidence, setPaymentEvidence] = useState([]);
+  const [waiverPending, setWaiverPending] = useState([]);
   const [matchdaysList, setMatchdaysList] = useState([]);
   const [selectedMatchdayId, setSelectedMatchdayId] = useState(null);
   const [matchdayData, setMatchdayData] = useState(null);
@@ -253,6 +257,37 @@ export default function Admin() {
     if (cardsRes.status === 'fulfilled') setMatchdayCards(cardsRes.value.cards || []);
   };
 
+  const fetchWaiverPending = async () => {
+    const token = getAdminToken();
+    if (!token) return;
+    try {
+      const data = await getWaiverPending(token);
+      setWaiverPending(data || []);
+    } catch {
+      setWaiverPending([]);
+    }
+  };
+
+  const handleApproveWaiver = async (playerId) => {
+    const token = getAdminToken();
+    try {
+      await approveWaiver(playerId, token);
+      fetchWaiverPending();
+    } catch (e) {
+      alert(e?.response?.data?.detail || 'Failed to approve waiver.');
+    }
+  };
+
+  const handleRejectWaiver = async (playerId) => {
+    const token = getAdminToken();
+    try {
+      await rejectWaiver(playerId, token);
+      fetchWaiverPending();
+    } catch (e) {
+      alert(e?.response?.data?.detail || 'Failed to reject waiver.');
+    }
+  };
+
   useEffect(() => {
     if (loggedIn) {
       if (tab === 'pending') fetchPending();
@@ -260,6 +295,7 @@ export default function Admin() {
       else if (tab === 'evidence') fetchPaymentEvidence();
       else if (tab === 'matchday') fetchMatchdays();
       else if (tab === 'dues') fetchDuesByQuarter();
+      else if (tab === 'waiver') fetchWaiverPending();
     }
   }, [loggedIn, tab, selectedMatchdayId]);
   useEffect(() => {
@@ -729,6 +765,11 @@ export default function Admin() {
             <span className="material-symbols-outlined shrink-0">calendar_month</span>
             <span className="text-sm">Matchday</span>
           </button>
+          <button type="button" className={`${navClass} ${tab === 'waiver' ? navActive : ''}`} onClick={() => { setTab('waiver'); closeMenu(); }}>
+            <span className="material-symbols-outlined shrink-0">handshake</span>
+            <span className="text-sm">Waiver requests</span>
+            {waiverPending.length > 0 && <span className="ml-auto bg-amber-500 text-black text-xs font-bold rounded-full px-1.5 py-0.5">{waiverPending.length}</span>}
+          </button>
         </nav>
         <div className="p-4 border-t border-primary/10">
           <button type="button" onClick={handleLogout} className="flex items-center gap-3 w-full px-3 py-3 min-h-[44px] rounded-lg text-slate-400 hover:bg-primary/5 hover:text-primary transition-colors touch-manipulation">
@@ -755,6 +796,7 @@ export default function Admin() {
             {tab === 'evidence' && 'Payment evidence'}
             {tab === 'dues' && 'Quarterly dues'}
             {tab === 'matchday' && 'Matchday'}
+            {tab === 'waiver' && 'Waiver requests'}
           </h2>
         </header>
 
@@ -1324,6 +1366,39 @@ export default function Admin() {
               <p className="text-slate-500">Loading matchday...</p>
             )}
           </>
+        )}
+        {tab === 'waiver' && (
+          <div className="p-4 md:p-6 space-y-4 max-w-2xl">
+            {waiverPending.length === 0 ? (
+              <p className="text-slate-500 text-center py-12">No pending waiver requests.</p>
+            ) : (
+              waiverPending.map((w) => (
+                <div key={w.player_id} className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center gap-3">
+                  <div className="flex-1">
+                    <p className="font-semibold text-slate-900 dark:text-white">{w.baller_name}</p>
+                    <p className="text-sm text-slate-500">{w.first_name} {w.surname}</p>
+                    <p className="text-sm text-amber-500 mt-1">
+                      Promises to pay by <strong>{w.due_by}</strong> &nbsp;·&nbsp; Q{w.quarter} {w.year}
+                    </p>
+                  </div>
+                  <div className="flex gap-2 shrink-0">
+                    <button
+                      onClick={() => handleApproveWaiver(w.player_id)}
+                      className="px-4 py-2 rounded-lg bg-primary text-white text-sm font-semibold hover:bg-primary/80 transition-colors"
+                    >
+                      Approve
+                    </button>
+                    <button
+                      onClick={() => handleRejectWaiver(w.player_id)}
+                      className="px-4 py-2 rounded-lg bg-red-500/10 text-red-500 text-sm font-semibold hover:bg-red-500/20 transition-colors"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         )}
         </div>
       </main>

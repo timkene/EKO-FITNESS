@@ -550,13 +550,16 @@ export default function Dashboard() {
               <h3 className="font-bold">Quarterly Dues</h3>
               <span className="ml-auto text-xs text-slate-500">{period}</span>
             </div>
-            <div className={`inline-block px-3 py-1.5 rounded-lg text-sm font-semibold mb-3 ${dues?.status === 'paid' ? 'bg-primary/20 text-primary' : dues?.status === 'waiver' ? 'bg-amber-500/20 text-amber-400' : 'bg-red-500/20 text-red-400'}`}>
-              {dues?.status === 'paid' ? '✓ Paid' : dues?.status === 'waiver' ? 'Waiver granted' : 'Payment owing'}
+            <div className={`inline-block px-3 py-1.5 rounded-lg text-sm font-semibold mb-3 ${dues?.status === 'paid' ? 'bg-primary/20 text-primary' : dues?.status === 'waiver' ? 'bg-amber-500/20 text-amber-400' : dues?.status === 'waiver_pending' ? 'bg-blue-500/20 text-blue-400' : 'bg-red-500/20 text-red-400'}`}>
+              {dues?.status === 'paid' ? '✓ Paid' : dues?.status === 'waiver' ? 'Waiver granted' : dues?.status === 'waiver_pending' ? '⏳ Waiver pending approval' : 'Payment owing'}
             </div>
             {dues?.status === 'waiver' && dues?.waiver_due_by && (
               <p className="text-slate-500 text-xs mb-3">Pay by {dues.waiver_due_by}</p>
             )}
-            {dues?.status !== 'paid' && !dues?.pending_evidence && (
+            {dues?.status === 'waiver_pending' && dues?.waiver_due_by && (
+              <p className="text-slate-500 text-xs mb-3">Your waiver request is awaiting admin approval. You committed to pay by {dues.waiver_due_by}.</p>
+            )}
+            {dues?.status !== 'paid' && dues?.status !== 'waiver_pending' && !dues?.pending_evidence && (
               <>
                 {dues?.status === 'owing' && (
                   <form onSubmit={handleApplyWaiver} className="flex flex-wrap items-end gap-3 mb-3">

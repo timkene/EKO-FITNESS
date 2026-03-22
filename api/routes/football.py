@@ -217,7 +217,7 @@ def _voting_opens_closes(sunday: date):
 def _can_vote(dues_status: str, waiver_due_by, suspended: bool) -> bool:
     if suspended:
         return False
-    if dues_status == "owing":
+    if dues_status in ("owing", "waiver_pending"):
         return False
     if dues_status == "waiver":
         if waiver_due_by:
@@ -575,9 +575,11 @@ def admin_dues_by_quarter(
             raw_status = dues_row[0]
             waiver_due_by = str(dues_row[1])[:10] if dues_row[1] else None
         effective = _resolve_dues_status(raw_status, dues_row[1] if dues_row else None)
-        # For display: waiver but past due = "waiver_overdue" so UI can show "Waiver (didn't pay)"
+        # For display: waiver_pending = awaiting admin; waiver but past due = waiver_overdue
         display_status = effective
-        if raw_status == "waiver" and waiver_due_by:
+        if raw_status == "waiver_pending":
+            display_status = "waiver_pending"
+        elif raw_status == "waiver" and waiver_due_by:
             try:
                 if date.fromisoformat(waiver_due_by) < date.today():
                     display_status = "waiver_overdue"
@@ -819,7 +821,7 @@ class WaiverApplyBody(BaseModel):
 
 @router.post("/member/waiver")
 def member_apply_waiver(body: WaiverApplyBody, payload: dict = Depends(require_player)):
-    """Apply for waiver for current quarter; set date when you will pay."""
+    """Apply for waiver for current quarter — sets status to waiver_pending until admin approves."""
     conn = get_conn()
     player_id = int(payload["sub"])
     year = datetime.utcnow().year
@@ -829,19 +831,82 @@ def member_apply_waiver(body: WaiverApplyBody, payload: dict = Depends(require_p
         date.fromisoformat(due_date)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid due_by date (use YYYY-MM-DD).")
-    cur = conn.execute("SELECT id FROM FOOTBALL.dues WHERE player_id = ? AND year = ? AND quarter = ?", [player_id, year, q])
-    if cur.fetchone():
+    cur = conn.execute("SELECT id, status FROM FOOTBALL.dues WHERE player_id = ? AND year = ? AND quarter = ?", [player_id, year, q])
+    row = cur.fetchone()
+    if row:
+        if row[1] == "waiver":
+            raise HTTPException(status_code=400, detail="Your waiver is already approved.")
+        if row[1] == "waiver_pending":
+            raise HTTPException(status_code=400, detail="Your waiver request is already pending admin approval.")
         conn.execute(
-            "UPDATE FOOTBALL.dues SET status = 'waiver', waiver_due_by = ? WHERE player_id = ? AND year = ? AND quarter = ?",
+            "UPDATE FOOTBALL.dues SET status = 'waiver_pending', waiver_due_by = ? WHERE player_id = ? AND year = ? AND quarter = ?",
             [due_date, player_id, year, q],
         )
     else:
         next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.dues").fetchone()[0]
         conn.execute(
-            "INSERT INTO FOOTBALL.dues (id, player_id, year, quarter, status, waiver_due_by) VALUES (?, ?, ?, ?, 'waiver', ?)",
+            "INSERT INTO FOOTBALL.dues (id, player_id, year, quarter, status, waiver_due_by) VALUES (?, ?, ?, ?, 'waiver_pending', ?)",
             [next_id, player_id, year, q, due_date],
         )
-    return {"success": True, "message": f"Waiver applied. Pay by {due_date}. Shown in your and admin portal as reminder."}
+    return {"success": True, "message": "Waiver request submitted. Waiting for admin approval before it takes effect."}
+
+
+@router.get("/admin/waiver-pending")
+def admin_waiver_pending(payload: dict = Depends(require_admin)):
+    """List all players with a pending waiver request this quarter."""
+    conn = get_conn()
+    year = datetime.utcnow().year
+    q = get_current_quarter()
+    rows = conn.execute("""
+        SELECT p.id, p.baller_name, p.first_name, p.surname, d.waiver_due_by, d.quarter, d.year
+        FROM FOOTBALL.dues d
+        JOIN FOOTBALL.players p ON p.id = d.player_id
+        WHERE d.status = 'waiver_pending' AND d.year = ? AND d.quarter = ?
+        ORDER BY p.baller_name
+    """, [year, q]).fetchall()
+    return [
+        {"player_id": r[0], "baller_name": r[1], "first_name": r[2], "surname": r[3],
+         "due_by": str(r[4])[:10] if r[4] else None, "quarter": r[5], "year": r[6]}
+        for r in rows
+    ]
+
+
+@router.post("/admin/approve-waiver/{player_id:int}")
+def admin_approve_waiver(player_id: int, payload: dict = Depends(require_admin)):
+    """Approve a player's pending waiver request — sets status to waiver."""
+    conn = get_conn()
+    year = datetime.utcnow().year
+    q = get_current_quarter()
+    row = conn.execute(
+        "SELECT id FROM FOOTBALL.dues WHERE player_id = ? AND year = ? AND quarter = ? AND status = 'waiver_pending'",
+        [player_id, year, q]
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="No pending waiver found for this player.")
+    conn.execute(
+        "UPDATE FOOTBALL.dues SET status = 'waiver' WHERE player_id = ? AND year = ? AND quarter = ?",
+        [player_id, year, q]
+    )
+    return {"success": True, "message": "Waiver approved. Player can now vote."}
+
+
+@router.post("/admin/reject-waiver/{player_id:int}")
+def admin_reject_waiver(player_id: int, payload: dict = Depends(require_admin)):
+    """Reject a player's pending waiver — resets status to owing."""
+    conn = get_conn()
+    year = datetime.utcnow().year
+    q = get_current_quarter()
+    row = conn.execute(
+        "SELECT id FROM FOOTBALL.dues WHERE player_id = ? AND year = ? AND quarter = ? AND status = 'waiver_pending'",
+        [player_id, year, q]
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="No pending waiver found for this player.")
+    conn.execute(
+        "UPDATE FOOTBALL.dues SET status = 'owing', waiver_due_by = NULL WHERE player_id = ? AND year = ? AND quarter = ?",
+        [player_id, year, q]
+    )
+    return {"success": True, "message": "Waiver rejected. Player status reset to owing."}
 
 
 # ---------- Matchday: module (list, create, by id), voting, groups, fixtures ----------
