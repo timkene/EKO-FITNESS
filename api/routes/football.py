@@ -1557,11 +1557,16 @@ def _ensure_groups(conn, matchday_id: int):
     goals_map  = {r[0]: r[1] for r in g_rows}
     assist_map = {r[0]: r[1] for r in a_rows}
 
-    # Career average rating from fixture_ratings — the truest measure of player quality
+    # Attendance-weighted rating: SUM(ratings) / total_ended_matchdays
+    # This rewards consistency — a one-game wonder with a single 9 scores much lower
+    # than a regular who averages 7 across all matchdays.
     try:
+        total_matchdays = conn.execute(
+            "SELECT COUNT(*) FROM FOOTBALL.matchdays WHERE COALESCE(matchday_ended, false) = true"
+        ).fetchone()[0] or 1
         r_rows = conn.execute(
             f"""
-            SELECT fr.player_id, AVG(fr.rating) AS avg_r
+            SELECT fr.player_id, SUM(fr.rating) AS sum_r
             FROM FOOTBALL.fixture_ratings fr
             JOIN FOOTBALL.matchday_fixtures mf ON mf.id = fr.fixture_id
             WHERE fr.player_id IN ({ph})
@@ -1569,7 +1574,7 @@ def _ensure_groups(conn, matchday_id: int):
             """,
             player_ids
         ).fetchall()
-        rating_map = {r[0]: float(r[1]) for r in r_rows if r[1] is not None}
+        rating_map = {r[0]: float(r[1]) / total_matchdays for r in r_rows if r[1] is not None}
     except Exception:
         rating_map = {}
 
