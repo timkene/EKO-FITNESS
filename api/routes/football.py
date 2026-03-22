@@ -1240,7 +1240,12 @@ def _player_career_stats(conn, player_id: int, _cache: Optional[dict] = None) ->
                     clean_sheets += _cache[key]
                 else:
                     clean_sheets += _group_clean_sheet_fixtures_count(conn, mid, g[0])
-    avg = round(sum(r["rating"] for r in matchday_ratings_list) / len(matchday_ratings_list), 2) if matchday_ratings_list else 0.0
+    # Divide by total ended matchdays (not games played) so absences count as 0.
+    # Leo played 1 game → score/5; Teejay played 2 games → sum/5. Drops every week you don't show.
+    total_ended_mds = conn.execute(
+        "SELECT COUNT(*) FROM FOOTBALL.matchdays WHERE COALESCE(matchday_ended, false) = true"
+    ).fetchone()[0] or 1
+    avg = round(sum(r["rating"] for r in matchday_ratings_list) / total_ended_mds, 2) if matchday_ratings_list else 0.0
     # MOTM awards
     try:
         motm_rows = conn.execute("""
