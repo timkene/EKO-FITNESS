@@ -1533,8 +1533,8 @@ def _ensure_groups(conn, matchday_id: int):
     import random
 
     n = len(player_ids)
-    group_size = 6  # 5 players + 1 "others" slot per group
-    # n_full_groups groups of exactly 6; any remainder goes into one last smaller group
+    group_size = 5  # 5 real players per group; "Others" is appended dynamically in the API response
+    # n_full_groups groups of exactly 5; any remainder goes into one last smaller group
     n_full_groups = max(1, n // group_size)
     remainder = n % group_size
     n_groups = n_full_groups + (1 if remainder > 0 else 0)
