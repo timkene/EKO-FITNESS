@@ -1263,12 +1263,10 @@ export default function Admin() {
                               {(f.status === 'in_progress' || f.status === 'completed') && (
                                 <>
                                   <button type="button" className="py-1.5 px-3 bg-slate-600 text-slate-100 font-semibold rounded-lg text-sm" onClick={() => { const open = addGoalFixtureId !== f.id; setAddGoalFixtureId(open ? f.id : null); if (open) { setAddGoalScorer(''); setAddGoalAssister(''); } }}>Add goal</button>
+                                  <button type="button" className="py-1.5 px-3 bg-amber-500/20 text-amber-400 font-semibold rounded-lg text-sm hover:bg-amber-500/30" onClick={() => { setAddCardFixtureId(addCardFixtureId === f.id ? null : f.id); setAddCardType('yellow'); setAddCardPlayerId(''); }}>+ Yellow</button>
+                                  <button type="button" className="py-1.5 px-3 bg-red-500/20 text-red-400 font-semibold rounded-lg text-sm hover:bg-red-500/30" onClick={() => { setAddCardFixtureId(addCardFixtureId === f.id ? null : f.id); setAddCardType('red'); setAddCardPlayerId(''); }}>+ Red</button>
                                   {f.status === 'in_progress' && (
-                                    <>
-                                      <button type="button" className="py-1.5 px-3 bg-amber-500/20 text-amber-400 font-semibold rounded-lg text-sm hover:bg-amber-500/30" onClick={() => { setAddCardFixtureId(addCardFixtureId === f.id ? null : f.id); setAddCardType('yellow'); setAddCardPlayerId(''); }}>+ Yellow</button>
-                                      <button type="button" className="py-1.5 px-3 bg-red-500/20 text-red-400 font-semibold rounded-lg text-sm hover:bg-red-500/30" onClick={() => { setAddCardFixtureId(addCardFixtureId === f.id ? null : f.id); setAddCardType('red'); setAddCardPlayerId(''); }}>+ Red</button>
-                                      <button type="button" className="py-1.5 px-3 bg-slate-600 text-slate-100 font-semibold rounded-lg text-sm" onClick={async () => { try { await endFixture(selectedMatchdayId, f.id, getAdminToken()); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>End fixture</button>
-                                    </>
+                                    <button type="button" className="py-1.5 px-3 bg-slate-600 text-slate-100 font-semibold rounded-lg text-sm" onClick={async () => { try { await endFixture(selectedMatchdayId, f.id, getAdminToken()); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>End fixture</button>
                                   )}
                                 </>
                               )}
@@ -1298,7 +1296,7 @@ export default function Admin() {
                                   <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg text-sm" onClick={async () => { const sid = addGoalScorer === '' ? null : Number(addGoalScorer); if (sid == null) { showToast('Select a scorer.'); return; } try { await addGoal(selectedMatchdayId, f.id, { scorer_player_id: sid, assister_player_id: addGoalAssister === '' ? null : Number(addGoalAssister) }, getAdminToken()); setAddGoalFixtureId(null); setAddGoalScorer(''); setAddGoalAssister(''); showToast(''); refreshFixtures(selectedMatchdayId); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Add goal</button>
                                 </div>
                               )}
-                              {f.status === 'in_progress' && addCardFixtureId === f.id && addCardType && (
+                              {(f.status === 'in_progress' || f.status === 'completed') && addCardFixtureId === f.id && addCardType && (
                                 <div className="w-full mt-3 p-4 rounded-lg bg-slate-800 border border-slate-600 flex flex-col gap-2 max-w-xs">
                                   <label className="text-sm text-slate-400">{addCardType === 'yellow' ? 'Yellow' : 'Red'} card – select player</label>
                                   <select value={addCardPlayerId === '' ? '' : String(addCardPlayerId)} onChange={(e) => setAddCardPlayerId(e.target.value === '' ? '' : Number(e.target.value))} className="rounded-lg bg-slate-800 border border-slate-600 px-3 py-2 text-slate-100 text-sm">
