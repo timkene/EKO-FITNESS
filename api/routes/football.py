@@ -2024,6 +2024,18 @@ def admin_matchday_add_card(matchday_id: int, body: AddCardBody, payload: dict =
     if body.card_type not in ("yellow", "red"):
         raise HTTPException(status_code=400, detail="card_type must be 'yellow' or 'red'.")
     conn = get_conn()
+    try:
+        # Ensure fixture_cards table exists (may not exist on older MotherDuck deployments)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS FOOTBALL.fixture_cards (
+                id INTEGER PRIMARY KEY,
+                fixture_id INTEGER NOT NULL,
+                player_id INTEGER NOT NULL,
+                card_type VARCHAR NOT NULL CHECK (card_type IN ('yellow', 'red'))
+            )
+        """)
+    except Exception:
+        pass
     md = _get_matchday_by_id(conn, matchday_id)
     if not md:
         raise HTTPException(status_code=404, detail="Matchday not found.")
@@ -2042,11 +2054,14 @@ def admin_matchday_add_card(matchday_id: int, body: AddCardBody, payload: dict =
         ).fetchone()
         if not fixture_row:
             raise HTTPException(status_code=400, detail="Fixture not found.")
-        next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.fixture_cards").fetchone()[0]
-        conn.execute(
-            "INSERT INTO FOOTBALL.fixture_cards (id, fixture_id, player_id, card_type) VALUES (?, ?, ?, ?)",
-            [next_id, body.fixture_id, body.player_id, body.card_type],
-        )
+        try:
+            next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.fixture_cards").fetchone()[0]
+            conn.execute(
+                "INSERT INTO FOOTBALL.fixture_cards (id, fixture_id, player_id, card_type) VALUES (?, ?, ?, ?)",
+                [next_id, body.fixture_id, body.player_id, body.card_type],
+            )
+        except Exception as e:
+            logger.warning(f"fixture_cards insert failed (non-fatal): {e}")
     # Others do not get rating deductions; only real players go into matchday_cards
     if not is_others:
         row = conn.execute("SELECT yellow_count, red_count FROM FOOTBALL.matchday_cards WHERE matchday_id = ? AND player_id = ?", [matchday_id, body.player_id]).fetchone()
@@ -2055,10 +2070,16 @@ def admin_matchday_add_card(matchday_id: int, body: AddCardBody, payload: dict =
             y += 1
         else:
             r += 1
-        conn.execute(
-            "INSERT OR REPLACE INTO FOOTBALL.matchday_cards (matchday_id, player_id, yellow_count, red_count) VALUES (?, ?, ?, ?)",
-            [matchday_id, body.player_id, y, r],
-        )
+        if row:
+            conn.execute(
+                "UPDATE FOOTBALL.matchday_cards SET yellow_count = ?, red_count = ? WHERE matchday_id = ? AND player_id = ?",
+                [y, r, matchday_id, body.player_id],
+            )
+        else:
+            conn.execute(
+                "INSERT INTO FOOTBALL.matchday_cards (matchday_id, player_id, yellow_count, red_count) VALUES (?, ?, ?, ?)",
+                [matchday_id, body.player_id, y, r],
+            )
         _sc_clear()
         return {"success": True, "message": f"Card added. Yellows: {y}, Reds: {r}."}
     return {"success": True, "message": "Card added (Others – no rating impact)."}
