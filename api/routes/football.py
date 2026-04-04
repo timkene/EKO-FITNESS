@@ -821,34 +821,65 @@ class WaiverApplyBody(BaseModel):
 
 @router.post("/member/waiver")
 def member_apply_waiver(body: WaiverApplyBody, payload: dict = Depends(require_player)):
-    """Apply for waiver for current quarter — sets status to waiver_pending until admin approves."""
+    """Apply for waiver for current quarter.
+    - Players with no owing quarters: auto-approved immediately.
+    - Players owing any past quarter: goes to waiver_pending for admin approval.
+    - Due date must be within the current quarter.
+    """
     conn = get_conn()
     player_id = int(payload["sub"])
-    year = datetime.utcnow().year
+    now = datetime.utcnow()
+    year = now.year
     q = get_current_quarter()
+
+    # Quarter end dates: Q1=Mar 31, Q2=Jun 30, Q3=Sep 30, Q4=Dec 31
+    quarter_ends = {1: date(year, 3, 31), 2: date(year, 6, 30), 3: date(year, 9, 30), 4: date(year, 12, 31)}
+    q_end = quarter_ends[q]
+
     try:
         due_date = body.due_by[:10]
-        date.fromisoformat(due_date)
+        due_date_obj = date.fromisoformat(due_date)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid due_by date (use YYYY-MM-DD).")
-    cur = conn.execute("SELECT id, status FROM FOOTBALL.dues WHERE player_id = ? AND year = ? AND quarter = ?", [player_id, year, q])
-    row = cur.fetchone()
-    if row:
-        if row[1] == "waiver":
+
+    if due_date_obj > q_end:
+        raise HTTPException(status_code=400, detail=f"Due date cannot be past the end of this quarter ({q_end}).")
+
+    # Check current quarter status
+    cur_row = conn.execute(
+        "SELECT id, status FROM FOOTBALL.dues WHERE player_id = ? AND year = ? AND quarter = ?",
+        [player_id, year, q]
+    ).fetchone()
+    if cur_row:
+        if cur_row[1] == "waiver":
             raise HTTPException(status_code=400, detail="Your waiver is already approved.")
-        if row[1] == "waiver_pending":
+        if cur_row[1] == "waiver_pending":
             raise HTTPException(status_code=400, detail="Your waiver request is already pending admin approval.")
+
+    # Check if player has any owing quarter (any year, any quarter)
+    owing_row = conn.execute(
+        "SELECT id FROM FOOTBALL.dues WHERE player_id = ? AND status = 'owing' LIMIT 1",
+        [player_id]
+    ).fetchone()
+    needs_approval = owing_row is not None
+
+    new_status = "waiver_pending" if needs_approval else "waiver"
+
+    if cur_row:
         conn.execute(
-            "UPDATE FOOTBALL.dues SET status = 'waiver_pending', waiver_due_by = ? WHERE player_id = ? AND year = ? AND quarter = ?",
-            [due_date, player_id, year, q],
+            "UPDATE FOOTBALL.dues SET status = ?, waiver_due_by = ? WHERE player_id = ? AND year = ? AND quarter = ?",
+            [new_status, due_date, player_id, year, q],
         )
     else:
         next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.dues").fetchone()[0]
         conn.execute(
-            "INSERT INTO FOOTBALL.dues (id, player_id, year, quarter, status, waiver_due_by) VALUES (?, ?, ?, ?, 'waiver_pending', ?)",
-            [next_id, player_id, year, q, due_date],
+            "INSERT INTO FOOTBALL.dues (id, player_id, year, quarter, status, waiver_due_by) VALUES (?, ?, ?, ?, ?, ?)",
+            [next_id, player_id, year, q, new_status, due_date],
         )
-    return {"success": True, "message": "Waiver request submitted. Waiting for admin approval before it takes effect."}
+
+    if needs_approval:
+        return {"success": True, "approved": False, "message": "Waiver request submitted. You have outstanding dues so admin must approve before it takes effect."}
+    return {"success": True, "approved": True, "message": f"Waiver approved. You can vote now. Please pay your dues by {due_date}."}
 
 
 @router.get("/admin/waiver-pending")
