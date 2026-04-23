@@ -258,6 +258,9 @@ def _validate_one_procedure(
         proc_info = engine._resolve_procedure_info(proc_code)
         proc_name = proc_info.get("name", proc_code) if proc_info else proc_code
 
+    proc_master = mongo_db.get_procedure_master(proc_code)
+    proc_class  = (proc_master or {}).get("procedure_class", "")
+
     # Run comprehensive validation for each (proc, diag) pair
     per_diag: Dict[str, object] = {}
     for diag_code in diag_codes:
@@ -324,6 +327,13 @@ def _validate_one_procedure(
         diagnosis_code=anchor_diag, diagnosis_name=anchor_diag_name,
         encounter_type=encounter_type,
     )
+
+    # ── Rule 12 — Injection Without Admission (pre-auth, non-admitted only) ──────
+    injection_check: Dict = {"triggered": False}
+    if encounter_type == "INPATIENT" and admission_status == "NOT_ADMITTED":
+        injection_check = check_injection_without_admission(
+            proc_code, proc_name, proc_class, diag_codes, diag_names
+        )
 
     # ── Quantity check ────────────────────────────────────────────────────────
     # Only master table max is authoritative. If no master max, pass through as-is.
@@ -396,6 +406,29 @@ def _validate_one_procedure(
         decision = "PENDING_REVIEW"
         requires_review = True
 
+    # Rule 12 — injection advisory (non-admitted pre-auth)
+    if injection_check.get("triggered"):
+        requires_review = True
+        if not injection_check.get("justified"):
+            review_reasons.append(
+                f"Injection-Without-Admission: oral alternative not documented — "
+                f"agent to verify. ({injection_check.get('reasoning', '')})"
+            )
+        else:
+            review_reasons.append(
+                f"Injection-Without-Admission: diagnosis justifies direct parenteral route. "
+                f"({injection_check.get('reasoning', '')})"
+            )
+        if decision != "DENY":
+            decision = "PENDING_REVIEW"
+
+    # Pre-Auth: force all non-DENY to PENDING_REVIEW — AI advises only, agent decides
+    if encounter_type == "INPATIENT" and decision != "DENY":
+        decision = "PENDING_REVIEW"
+        requires_review = True
+        if "Pre-Auth: agent decision required." not in review_reasons:
+            review_reasons.append("Pre-Auth: agent decision required.")
+
     approved_diagnoses = passing_diags if not all_failed else []
     denied_diagnoses   = failing_diags
 
@@ -421,7 +454,7 @@ def _validate_one_procedure(
 
         mongo_db.insert_klaire_review({
             "review_id":           review_id,
-            "review_type":         "PA_OUTPATIENT",
+            "review_type":         "PA_PREAUTH" if encounter_type == "INPATIENT" else "PA_OUTPATIENT",
             "procedure_code":      proc_code,
             "procedure_name":      proc_name,
             "approved_diagnoses":  approved_diagnoses,
@@ -439,6 +472,7 @@ def _validate_one_procedure(
             "price_override":      price_override,
             "comment":             comment or "",
             "first_line":          first_line,
+            "injection_check":     injection_check,
             "review_reasons":      review_reasons,
             "status":              "PENDING_REVIEW",
             "reviewed_by":         None,
@@ -466,6 +500,7 @@ def _validate_one_procedure(
         "diag_detail":         diag_detail,
         "proc_rules":          [_r(r) for r in proc_rules],
         "first_line":          first_line,
+        "injection_check":     injection_check,
         "requires_agent_review": requires_review,
         "review_reasons":      review_reasons,
         "review_id":           review_id,
