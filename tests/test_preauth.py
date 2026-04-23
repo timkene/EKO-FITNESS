@@ -35,3 +35,7 @@ def test_syrup_not_detected():
 
 def test_class_field_used():
     assert _is_injection_procedure("Ceftriaxone 1g", "INJECTION") is True
+
+
+def test_im_at_start_of_name_detected():
+    assert _is_injection_procedure("IM Gentamicin 80mg") is True

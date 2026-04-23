@@ -19,6 +19,7 @@ Rules applied (capitation and 14-day visit already handled at consultation stage
   8. Diagnosis Stacking
   9. First-Line Treatment Check (AI — no learning, always fresh)
  10. Disease Combination Check (AI — request-level, no learning)
+ 12. Injection Without Admission (pre-auth, non-admitted only)
 
 Trust model:
   - Master table / trusted learning table → auto-decide (no agent needed)
@@ -158,7 +159,7 @@ _INJECTION_KEYWORDS = [
 
 
 def _is_injection_procedure(proc_name: str, proc_class: str = "") -> bool:
-    text = f"{proc_name} {proc_class}".upper()
+    text = f" {proc_name} {proc_class} ".upper()
     return any(kw in text for kw in _INJECTION_KEYWORDS)
 
 
@@ -175,6 +176,8 @@ def check_injection_without_admission(
     Never auto-denies. Always PENDING_REVIEW if triggered.
     """
     if not _is_injection_procedure(procedure_name, procedure_class):
+        return {"triggered": False}
+    if not diagnosis_codes:
         return {"triggered": False}
 
     diag_list = ", ".join(
@@ -650,6 +653,7 @@ def validate_pa_request(
     encounter_date: str,
     encounter_type: str,
     db_path: str,
+    admission_status: str = "NOT_ADMITTED",
 ) -> Dict:
     """
     Validate a full PA request (multiple procedures, each with 1+ diagnoses).
@@ -685,6 +689,7 @@ def validate_pa_request(
             provider_price=item.get("provider_price"),
             comment=item.get("comment"),
             quantity=int(item.get("quantity") or 1),
+            admission_status=admission_status,
         )
 
     # Run all procedures in parallel — each thread has its own DuckDB connection
