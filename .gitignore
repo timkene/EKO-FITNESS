@@ -1,9 +1,38 @@
+# Environment & secrets
 .env
 .env.*
 !.env.example
-node_modules/
+secrets.toml
+.streamlit/secrets.toml
+config.toml
+
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+venv/
+.venv/
+
+# Databases
 *.duckdb
 *.db
+bnf_chroma_db/
+.dlt/
+
+# Logs
+*.log
+outputs/
+
+# OS
 .DS_Store
+node_modules/
+
+# Large binary / data files not needed in repo
+*.xlsx
+*.numbers
+*.pdf
+*.csv
+
+# Local dev tooling
+.superpowers/
+.mlr_launchd.*

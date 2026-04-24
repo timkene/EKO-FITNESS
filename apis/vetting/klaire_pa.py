@@ -260,6 +260,41 @@ def _validate_one_procedure(
 
     proc_master = mongo_db.get_procedure_master(proc_code)
     proc_class  = (proc_master or {}).get("procedure_class", "")
+    proc_branch = (proc_master or {}).get("branch", "PRE-AUTH").upper() if proc_master else None
+
+    # ── Branch enforcement ────────────────────────────────────────────────────
+    # NO-AUTH branch: blocked on INPATIENT (unless ADMITTED, which allows all)
+    # PRE-AUTH/unknown branch: blocked on OUTPATIENT
+    branch_violation = None
+    if proc_branch == "NO-AUTH" and encounter_type == "INPATIENT" and admission_status != "ADMITTED":
+        branch_violation = (
+            f"Procedure {proc_code} is a No-Auth (outpatient) procedure and cannot be "
+            f"submitted on a Pre-Auth encounter without admission."
+        )
+    elif encounter_type == "OUTPATIENT" and proc_branch is not None and proc_branch != "NO-AUTH":
+        branch_violation = (
+            f"Procedure {proc_code} is a Pre-Auth-only procedure and cannot be "
+            f"submitted on a No-Auth (outpatient) encounter."
+        )
+
+    if branch_violation:
+        return {
+            "procedure_code":      proc_code,
+            "procedure_name":      proc_name,
+            "decision":            "DENY",
+            "approved_diagnoses":  [],
+            "denied_diagnoses":    list(diag_codes),
+            "diag_detail":         {c: {"name": diag_names.get(c, c), "passed": False, "rules": []} for c in diag_codes},
+            "diag_names":          diag_names,
+            "proc_rules":          [],
+            "first_line":          {},
+            "review_reasons":      [branch_violation],
+            "requires_review":     False,
+            "quantity":            quantity,
+            "adjusted_qty":        quantity,
+            "qty_adjusted":        False,
+            "injection_check":     {"triggered": False},
+        }
 
     # Run comprehensive validation for each (proc, diag) pair
     per_diag: Dict[str, object] = {}
