@@ -858,6 +858,26 @@ elif "PA Request" in mode:
     # PA REQUEST — multi-procedure, multi-diagnosis
     # ══════════════════════════════════════════════════════════════════════════
 
+    # ── Capitation check helper ───────────────────────────────────────────────
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _capitation_status(enr_id: str, prov_id: str) -> dict:
+        try:
+            r = requests.get(
+                f"{API}/api/v1/klaire/is-capitated",
+                params={"enrollee_id": enr_id, "provider_id": prov_id},
+                timeout=5,
+            )
+            if r.ok:
+                return r.json()
+        except Exception:
+            pass
+        return {"is_capitated": False, "at_capitated_provider": False}
+
+    _enr  = (enrollee_id or "").strip()
+    _prov = (provider_id or "").strip()
+    _cap  = _capitation_status(_enr, _prov) if _enr else {"is_capitated": False, "at_capitated_provider": False}
+    _is_capitated_at_provider = _cap.get("is_capitated") and _cap.get("at_capitated_provider")
+
     # ── GP gate: consultation must be completed first ─────────────────────────
     if not st.session_state.get("result"):
         st.warning(
@@ -871,6 +891,29 @@ elif "PA Request" in mode:
         st.stop()
 
     consult_result = st.session_state.get("result", {})
+    consult_dec    = consult_result.get("decision", "")
+    consult_code   = consult_result.get("approved_code") or consult_result.get("change_to_code", "")
+
+    # ── Block PA if consultation was denied (unless capitated enrollee at capitated provider) ──
+    if consult_dec == "DENY":
+        if _is_capitated_at_provider:
+            st.info(
+                "ℹ️  The GP consultation was **denied**, but this enrollee's GP consult is "
+                f"covered under capitation at **{_cap.get('provider_name', _prov)}**. "
+                "PA Request is available — note that **specialist referrals still require approval**."
+            )
+        else:
+            st.error(
+                "🚫 **PA Request blocked.**  \n"
+                "The GP consultation was **denied**. The enrollee has not been approved to see a "
+                "doctor, so procedures cannot be requested.  \n\n"
+                "If you believe this is an error, go back to New Request and complete the consultation."
+            )
+            if st.button("← Back to New Request", type="primary"):
+                st.session_state["_force_mode"] = "📋 New Request"
+                st.rerun()
+            st.stop()
+
     st.markdown("## 💊 PA Request")
     st.caption(
         "Select every procedure the doctor is requesting and its corresponding diagnosis "
@@ -879,8 +922,6 @@ elif "PA Request" in mode:
     )
 
     # Show consultation summary
-    consult_dec = consult_result.get("decision", "")
-    consult_code = consult_result.get("approved_code") or consult_result.get("change_to_code", "")
     if consult_dec in ("APPROVE", "CHANGE"):
         st.markdown(
             f'<div style="background:#052e16;border:1px solid #16a34a;border-radius:8px;'
@@ -889,6 +930,8 @@ elif "PA Request" in mode:
             f'</div>',
             unsafe_allow_html=True,
         )
+    elif consult_dec == "PENDING_REVIEW":
+        st.warning("⏳ Consultation is pending agent review. Proceed with caution.")
 
     _enc_display = st.radio(
         "Encounter Type",
@@ -1312,6 +1355,26 @@ elif "PA Request" in mode:
                     f'<span style="color:#d1fae5;font-size:0.85em;">{pc_reason}</span></div>',
                     unsafe_allow_html=True,
                 )
+
+        # ── Diagnosis-Encounter Mismatch banner ───────────────────────────────
+        mismatch = pa_result.get("diagnosis_encounter_mismatch")
+        if mismatch and mismatch.get("flagged"):
+            flagged_diags = mismatch.get("flagged_diagnoses", [])
+            reasoning     = mismatch.get("reasoning", "")
+            flag_lines = "".join(
+                f'<br><span style="color:#fca5a5;font-size:0.8em;">• <strong>{f.get("code","?")}</strong> {f.get("name","")}: {f.get("reason","")}</span>'
+                for f in flagged_diags
+            )
+            st.markdown(
+                f'<div style="background:#450a0a;border-left:4px solid #ef4444;'
+                f'border-radius:8px;padding:12px 16px;margin-bottom:12px;">'
+                f'<strong style="color:#fecaca;">🚨 Upcoding Alert — Admission-Level Diagnosis on Outpatient PA</strong><br>'
+                f'<span style="color:#fca5a5;font-size:0.9em;">{reasoning}</span>'
+                + flag_lines +
+                f'<br><span style="color:#fca5a5;font-size:0.8em;font-style:italic;">If this diagnosis is accurate, the patient should be admitted and a Pre-Auth submitted instead.</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
         for proc_res in pa_result.get("items", []):
             _render_pa_item(proc_res, pa_result.get("encounter_type", "OUTPATIENT"))

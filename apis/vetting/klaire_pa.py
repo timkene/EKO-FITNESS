@@ -577,6 +577,70 @@ def _validate_one_procedure(
     }
 
 
+# ── Diagnosis-Encounter Mismatch Check ───────────────────────────────────────
+
+def check_diagnosis_encounter_mismatch(
+    diagnoses: List[Dict],   # [{"code": str, "name": str}, ...]
+    encounter_type: str = "OUTPATIENT",
+) -> Dict:
+    """
+    Flags when a diagnosis that typically requires hospital admission is submitted
+    on an outpatient PA request.
+
+    Pattern caught: provider uses a severe/inpatient diagnosis (e.g. sepsis, MI,
+    stroke) to justify investigations on a No-Auth outpatient visit — classic
+    upcoding.  If the diagnosis is genuinely that severe, the patient should be
+    admitted and a Pre-Auth submitted instead.
+
+    Only runs on OUTPATIENT encounters. Always AI. Always requires review if flagged.
+    """
+    if encounter_type != "OUTPATIENT" or not diagnoses:
+        return {"flagged": False, "flagged_diagnoses": [], "reasoning": "", "requires_review": False}
+
+    diag_list = "\n".join(f"- {d['code']}: {d['name']}" for d in diagnoses)
+
+    prompt = f"""You are a Nigerian HMO medical reviewer assessing an OUTPATIENT PA request.
+
+The following diagnoses were submitted on a No-Auth outpatient encounter:
+
+{diag_list}
+
+Your task: identify any diagnosis that is typically a HOSPITAL ADMISSION condition — i.e., a condition that in standard Nigerian clinical practice would require the patient to be admitted rather than managed outpatient.
+
+Examples of admission-level diagnoses: sepsis, severe malaria with complications, myocardial infarction, stroke, peritonitis, severe pre-eclampsia, meningitis, pulmonary embolism, severe pneumonia (requiring IV antibiotics or O2), diabetic ketoacidosis, severe anaemia requiring transfusion.
+
+For each diagnosis, respond whether it is:
+- "outpatient_ok": routinely managed outpatient
+- "inpatient_required": typically requires admission
+
+Flag ONLY diagnoses that are clearly inpatient-level. Do not flag conditions that can sometimes be severe but are routinely managed outpatient (e.g. uncomplicated malaria, hypertension, mild pneumonia).
+
+Respond in JSON only (no markdown):
+{{
+  "flagged": true or false,
+  "flagged_diagnoses": [
+    {{
+      "code": "diagnosis code",
+      "name": "diagnosis name",
+      "reason": "one sentence — why this is an admission-level diagnosis used on an outpatient request"
+    }}
+  ],
+  "reasoning": "One sentence summary of the overall concern, or empty string if nothing flagged."
+}}"""
+
+    ai = _call_claude(prompt)
+    flagged        = bool(ai.get("flagged", False))
+    flagged_diags  = ai.get("flagged_diagnoses", [])
+    reasoning      = ai.get("reasoning", "")
+
+    return {
+        "flagged":            flagged,
+        "flagged_diagnoses":  flagged_diags,
+        "reasoning":          reasoning,
+        "requires_review":    flagged,
+    }
+
+
 # ── Disease Combination Check (request-level) ─────────────────────────────────
 
 def check_disease_combination(
@@ -824,6 +888,7 @@ def validate_pa_request(
                 all_diags_for_combo.append({"code": code, "name": name})
 
     combo_check = check_disease_combination(all_diags_for_combo, encounter_type)
+    mismatch_check = check_diagnosis_encounter_mismatch(all_diags_for_combo, encounter_type)
 
     # ── Procedure Combination Necessity Check (request-level) ─────────────────
     # Build procedure list with their approved diagnoses for the AI to reason over
@@ -933,6 +998,8 @@ def validate_pa_request(
         overall = "PENDING_REVIEW"
     if proc_combo_check["requires_review"] and overall not in ("DENY", "PENDING_REVIEW"):
         overall = "PENDING_REVIEW"
+    if mismatch_check["requires_review"] and overall not in ("DENY", "PENDING_REVIEW"):
+        overall = "PENDING_REVIEW"
 
     return {
         "overall_decision":        overall,
@@ -944,7 +1011,9 @@ def validate_pa_request(
         "items":                   results,
         "disease_combination":     combo_check,
         "procedure_combination":   proc_combo_check,
+        "diagnosis_encounter_mismatch": mismatch_check,
         "requires_agent_review":   any(r.get("requires_agent_review") for r in results)
                                    or combo_check["requires_review"]
-                                   or proc_combo_check["requires_review"],
+                                   or proc_combo_check["requires_review"]
+                                   or mismatch_check["requires_review"],
     }

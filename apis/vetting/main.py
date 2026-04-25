@@ -148,6 +148,8 @@ def get_capitation():
         _capitation_loaded = True
     return CAPITATED_PROCS, CAPITATED_ENROLLEES
 
+
+
 # ============================================================================
 # PYDANTIC REQUEST/RESPONSE MODELS
 # ============================================================================
@@ -379,6 +381,7 @@ def _get_thread_engine():
 async def lifespan(app: FastAPI):
     get_engine()
     get_capitation()
+    get_providers()   # pre-load 10k providers into memory so first request is instant
     yield
     logger.info("Shutting down vetting API")
 
@@ -396,8 +399,55 @@ app.add_middleware(
 
 
 # ============================================================================
+# PROVIDERS CACHE (loaded once at startup from MotherDuck)
+# ============================================================================
+
+PROVIDERS_CACHE: List[Dict] = []
+_providers_loaded = False
+
+
+def get_providers() -> List[Dict]:
+    global PROVIDERS_CACHE, _providers_loaded
+    if not _providers_loaded:
+        try:
+            eng = get_engine()
+            rows = eng.conn.execute("""
+                SELECT TRIM(providerid)   AS id,
+                       TRIM(providername) AS name,
+                       TRIM(statename)    AS state,
+                       TRIM(lganame)      AS lga
+                FROM "AI DRIVEN DATA".PROVIDERS
+                WHERE providerid IS NOT NULL AND TRIM(providerid) <> ''
+                  AND providername IS NOT NULL AND TRIM(providername) <> ''
+                ORDER BY providername
+            """).fetchall()
+            PROVIDERS_CACHE = [
+                {"id": r[0], "name": r[1], "state": r[2] or "", "lga": r[3] or ""}
+                for r in rows
+            ]
+            logger.info(f"✅ Providers loaded: {len(PROVIDERS_CACHE)} records")
+        except Exception as e:
+            logger.warning(f"Could not load providers: {e}")
+        _providers_loaded = True
+    return PROVIDERS_CACHE
+
+
+# ============================================================================
 # ENDPOINTS
 # ============================================================================
+
+@app.get("/api/v1/klaire/is-capitated")
+def klaire_is_capitated(enrollee_id: str, provider_id: str = ""):
+    """Return whether an enrollee is capitated and whether the given provider matches."""
+    cap_procs, cap_enrollees = get_capitation()
+    if enrollee_id not in cap_enrollees:
+        return {"is_capitated": False, "provider_key": None, "provider_name": None, "at_capitated_provider": False}
+    info    = cap_enrollees[enrollee_id]
+    cpk     = info["provider_key"]
+    cpn     = info["provider_name"]
+    at_cap  = bool(provider_id and str(provider_id).strip() == str(cpk).strip())
+    return {"is_capitated": True, "provider_key": cpk, "provider_name": cpn, "at_capitated_provider": at_cap}
+
 
 @app.get("/api/v1/health")
 def health_check():
@@ -1729,25 +1779,9 @@ def klaire_procedures():
 
 @app.get("/api/v1/klaire/providers")
 def klaire_providers():
-    """Return all providers (id, name, state, lga) for the KLAIRE sidebar dropdown."""
+    """Return all providers (id, name, state, lga) for the KLAIRE sidebar dropdown. Served from cache."""
     try:
-        eng = get_engine()
-        rows = eng.conn.execute("""
-            SELECT TRIM(providerid)   AS id,
-                   TRIM(providername) AS name,
-                   TRIM(statename)    AS state,
-                   TRIM(lganame)      AS lga
-            FROM "AI DRIVEN DATA".PROVIDERS
-            WHERE providerid IS NOT NULL AND TRIM(providerid) <> ''
-              AND providername IS NOT NULL AND TRIM(providername) <> ''
-            ORDER BY providername
-        """).fetchall()
-        return {
-            "providers": [
-                {"id": r[0], "name": r[1], "state": r[2] or "", "lga": r[3] or ""}
-                for r in rows
-            ]
-        }
+        return {"providers": get_providers()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
