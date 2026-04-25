@@ -17,7 +17,7 @@ Rules applied (capitation and 14-day visit already handled at consultation stage
   6. Procedure 30-Day Duplicate
   7. Clinical Necessity (AI)
   8. Diagnosis Stacking
-  9. First-Line Treatment Check (AI — no learning, always fresh)
+  9. Clinical Necessity (ClinicalNecessityEngine — admission auto-detect, route, step-therapy, tests)
  10. Disease Combination Check (AI — request-level, no learning)
  12. Injection Without Admission (pre-auth, non-admitted only)
 
@@ -375,28 +375,75 @@ def _validate_one_procedure(
     all_failed    = len(passing_diags) == 0
     any_diag_ai   = any(d["has_ai"] for d in diag_detail.values())
 
-    # ── First-line check (run against the first available diagnosis) ──────────
-    # Fetch 30-day treatment history so the AI can recognise step-up therapy
+    # ── Clinical necessity check (engine-based, replaces simple first-line check)
+    # Uses ClinicalNecessityEngine which:
+    #   1. Auto-detects admission from ADM01/02/03 in PA DATA (independent of provider claim)
+    #   2. Detects route (injectable/oral) and checks if oral was tried first
+    #   3. Fetches 30-day prior meds for step-therapy justification
+    #   4. Fetches 3-day test history for prerequisite confirmatory tests
+    # Falls back to simple check if engine fails.
     anchor_diag      = diag_codes[0] if diag_codes else ""
     anchor_diag_name = diag_names.get(anchor_diag, anchor_diag)
-    prior_treatments: List[Dict] = []
-    if enrollee_id and encounter_date:
+    first_line: Dict = {}
+    if anchor_diag and enrollee_id and encounter_date:
         try:
-            from apis.vetting.thirty_day import ThirtyDayValidator
-            _tdv = ThirtyDayValidator(engine.conn)
-            prior_treatments = _tdv._get_30_day_procedures(enrollee_id, encounter_date)
-        except Exception:
-            prior_treatments = []
-    first_line = check_first_line_treatment(
-        procedure_code=proc_code, procedure_name=proc_name,
-        diagnosis_code=anchor_diag, diagnosis_name=anchor_diag_name,
-        encounter_type=encounter_type,
-        prior_treatments=prior_treatments or None,
-    )
+            from .clinical_necessity import ClinicalNecessityEngine
+            _cne    = ClinicalNecessityEngine(conn=engine.conn)
+            _cn_res = _cne.check(
+                procedure_code=proc_code,
+                procedure_name=proc_name,
+                procedure_class=proc_class or "",
+                diagnosis_code=anchor_diag,
+                diagnosis_name=anchor_diag_name,
+                enrollee_id=enrollee_id,
+                encounter_date=encounter_date,
+            )
+            first_line = {
+                "decision":         "APPROVE" if _cn_res.passed else "DENY",
+                "is_first_line":    _cn_res.passed,
+                "confidence":       _cn_res.confidence,
+                "reasoning":        _cn_res.reasoning,
+                "source":           _cn_res.source,
+                "requires_review":  True,
+                "auto":             False,
+                "route":            _cn_res.route,
+                "route_appropriate": _cn_res.route_appropriate,
+                "step_down":        _cn_res.step_down_applicable,
+                "severity":         _cn_res.severity,
+                "concerns":         _cn_res.concerns,
+            }
+        except Exception as _e:
+            logger.warning(f"ClinicalNecessityEngine failed for {proc_code}: {_e}, falling back to simple check")
+            first_line = check_first_line_treatment(
+                procedure_code=proc_code, procedure_name=proc_name,
+                diagnosis_code=anchor_diag, diagnosis_name=anchor_diag_name,
+                encounter_type=encounter_type,
+            )
+    else:
+        first_line = check_first_line_treatment(
+            procedure_code=proc_code, procedure_name=proc_name,
+            diagnosis_code=anchor_diag, diagnosis_name=anchor_diag_name,
+            encounter_type=encounter_type,
+        )
 
     # ── Rule 12 — Injection Without Admission (pre-auth, non-admitted only) ──────
+    # Also fires when ClinicalNecessityEngine detected the route is injectable
+    # but the engine's admission check found no active ADM code in PA DATA.
     injection_check: Dict = {"triggered": False}
-    if encounter_type == "INPATIENT" and admission_status == "NOT_ADMITTED":
+    _route_is_injectable = (
+        first_line.get("route", "") == "INJECTABLE"
+        or _is_injection_procedure(proc_name, proc_class or "")
+    )
+    _admitted_per_engine = (
+        first_line.get("route_appropriate", True)  # engine approves injectable → admitted or justified
+        and first_line.get("route", "") == "INJECTABLE"
+    )
+    _trigger_rule12 = (
+        encounter_type == "INPATIENT"
+        and admission_status == "NOT_ADMITTED"
+        and _route_is_injectable
+    )
+    if _trigger_rule12 and not _admitted_per_engine:
         injection_check = check_injection_without_admission(
             proc_code, proc_name, proc_class, diag_codes, diag_names
         )
