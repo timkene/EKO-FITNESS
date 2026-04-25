@@ -92,14 +92,17 @@ def check_first_line_treatment(
     diagnosis_code: str,
     diagnosis_name: str,
     encounter_type: str = "OUTPATIENT",
+    prior_treatments: Optional[List[Dict]] = None,
 ) -> Dict:
     """
     Clinical necessity check — is this procedure appropriate for this diagnosis?
 
     Unlike other rules, this NEVER learns and NEVER auto-decides.
-    Every request is evaluated fresh by AI because necessity is context-dependent:
-    the same procedure+diagnosis pair may be justified in one clinical context
-    and unnecessary in another (e.g. URTI+FBC: routine=no, suspected bacterial=yes).
+    Every request is evaluated fresh by AI because necessity is context-dependent.
+
+    prior_treatments: list of {code, description, date, source} from the last 30 days.
+    When provided, the AI can recognise that first-line alternatives were already tried,
+    upgrading a would-be DENY to APPROVE (step-therapy justification).
 
     Always returns requires_review=True, auto=False.
     """
@@ -107,6 +110,23 @@ def check_first_line_treatment(
         "The patient has been admitted (INPATIENT)." if encounter_type == "INPATIENT"
         else "This is an outpatient visit."
     )
+
+    history_block = ""
+    if prior_treatments:
+        lines = [
+            f"  • {t.get('code','').upper()} — {t.get('description') or t.get('code','')} "
+            f"(on {str(t.get('date',''))[:10]}, source: {t.get('source','')})"
+            for t in prior_treatments
+        ]
+        history_block = (
+            "\n\nPATIENT TREATMENT HISTORY (last 30 days from PA and claims data):\n"
+            + "\n".join(lines)
+            + "\n\nIMPORTANT: If the history shows the patient has already received "
+            "first-line alternatives for this diagnosis, treat the current request as "
+            "justified step-up therapy and APPROVE. Do not penalise a second-line drug "
+            "when the first line has already been tried."
+        )
+
     prompt = f"""You are a strict clinical reviewer for a Nigerian HMO cost-control unit.
 
 {context}
@@ -114,13 +134,14 @@ def check_first_line_treatment(
 Your job is to determine if the procedure/medication below is a NECESSARY first-line treatment or investigation for the given diagnosis in standard Nigerian outpatient HMO practice.
 
 Procedure/Medication: {procedure_code} — {procedure_name}
-Diagnosis: {diagnosis_code} — {diagnosis_name}
+Diagnosis: {diagnosis_code} — {diagnosis_name}{history_block}
 
 DECISION RULES (apply strictly):
-- APPROVE only if this is unambiguously a standard first-line treatment or essential investigation for this exact diagnosis.
+- APPROVE if this is unambiguously a standard first-line treatment or essential investigation for this exact diagnosis.
 - APPROVE if it is a well-recognised symptomatic treatment for this diagnosis (e.g. cough syrup for URTI).
+- APPROVE if the patient history above shows they have already tried the standard first-line options for this diagnosis (step-up therapy justification).
 - DENY if the diagnosis is typically managed clinically without this investigation (e.g. simple URTI does not require FBC or CRP unless complications are clinically documented).
-- DENY if this is a second-line, specialist-reserved, or confirmatory test where simpler options suffice.
+- DENY if this is a second-line, specialist-reserved, or confirmatory test where simpler options suffice AND there is no prior first-line treatment in the history.
 - DENY if you cannot clearly identify what the procedure is from the name given.
 - When in doubt, DENY — the agent will review.
 
@@ -129,7 +150,7 @@ Respond in JSON only (no markdown):
   "action": "APPROVE" or "DENY",
   "is_first_line": true or false,
   "confidence": 0-100,
-  "reasoning": "One concise sentence explaining the decision."
+  "reasoning": "One concise sentence explaining the decision. If approving due to prior treatment history, state that explicitly."
 }}"""
 
     ai = _call_claude(prompt)
@@ -355,12 +376,22 @@ def _validate_one_procedure(
     any_diag_ai   = any(d["has_ai"] for d in diag_detail.values())
 
     # ── First-line check (run against the first available diagnosis) ──────────
+    # Fetch 30-day treatment history so the AI can recognise step-up therapy
     anchor_diag      = diag_codes[0] if diag_codes else ""
     anchor_diag_name = diag_names.get(anchor_diag, anchor_diag)
+    prior_treatments: List[Dict] = []
+    if enrollee_id and encounter_date:
+        try:
+            from apis.vetting.thirty_day import ThirtyDayValidator
+            _tdv = ThirtyDayValidator(engine.conn)
+            prior_treatments = _tdv._get_30_day_procedures(enrollee_id, encounter_date)
+        except Exception:
+            prior_treatments = []
     first_line = check_first_line_treatment(
         procedure_code=proc_code, procedure_name=proc_name,
         diagnosis_code=anchor_diag, diagnosis_name=anchor_diag_name,
         encounter_type=encounter_type,
+        prior_treatments=prior_treatments or None,
     )
 
     # ── Rule 12 — Injection Without Admission (pre-auth, non-admitted only) ──────
@@ -490,8 +521,12 @@ def _validate_one_procedure(
         mongo_db.insert_klaire_review({
             "review_id":           review_id,
             "review_type":         "PA_PREAUTH" if encounter_type == "INPATIENT" else "PA_OUTPATIENT",
+            "enrollee_id":         enrollee_id,
+            "encounter_date":      encounter_date,
             "procedure_code":      proc_code,
             "procedure_name":      proc_name,
+            "decision":            decision,
+            "ai_recommendation":   decision,
             "approved_diagnoses":  approved_diagnoses,
             "denied_diagnoses":    denied_diagnoses,
             "diag_names":          diag_names,
@@ -796,17 +831,19 @@ def validate_pa_request(
     seen_proc_codes: set = set()
     for item, res in zip(items, results):
         pc = item["procedure_code"].strip().upper()
-        if pc in seen_proc_codes or res.get("decision") == "DENY":
+        if pc in seen_proc_codes:
             continue
         seen_proc_codes.add(pc)
-        approved_diag_codes = res.get("approved_diagnoses", [])
+        # Use all submitted diagnosis codes (not just approved) so combo AI has full context
         diag_names_map = item.get("diagnosis_names", {})
+        all_diag_codes = item.get("diagnosis_codes", [])
         proc_combo_input.append({
             "code": pc,
             "name": res.get("procedure_name", pc),
+            "individual_decision": res.get("decision", "APPROVE"),
             "diagnoses": [
                 {"code": dc, "name": diag_names_map.get(dc, dc)}
-                for dc in approved_diag_codes
+                for dc in all_diag_codes
             ],
         })
 
@@ -835,9 +872,12 @@ def validate_pa_request(
             res["review_id"] = review_id
             mongo_db.insert_klaire_review({
                 "review_id":          review_id,
-                "review_type":        "PA_OUTPATIENT",
+                "review_type":        "PA_PREAUTH" if encounter_type == "INPATIENT" else "PA_OUTPATIENT",
+                "enrollee_id":        enrollee_id,
+                "encounter_date":     encounter_date,
                 "procedure_code":     res.get("procedure_code"),
                 "procedure_name":     res.get("procedure_name"),
+                "decision":           "PENDING_REVIEW",
                 "approved_diagnoses": res.get("approved_diagnoses", []),
                 "denied_diagnoses":   res.get("denied_diagnoses", []),
                 "diag_names":         {},

@@ -1727,6 +1727,64 @@ def klaire_procedures():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/v1/klaire/providers")
+def klaire_providers():
+    """Return all providers (id, name, state, lga) for the KLAIRE sidebar dropdown."""
+    try:
+        eng = get_engine()
+        rows = eng.conn.execute("""
+            SELECT TRIM(providerid)   AS id,
+                   TRIM(providername) AS name,
+                   TRIM(statename)    AS state,
+                   TRIM(lganame)      AS lga
+            FROM "AI DRIVEN DATA".PROVIDERS
+            WHERE providerid IS NOT NULL AND TRIM(providerid) <> ''
+              AND providername IS NOT NULL AND TRIM(providername) <> ''
+            ORDER BY providername
+        """).fetchall()
+        return {
+            "providers": [
+                {"id": r[0], "name": r[1], "state": r[2] or "", "lga": r[3] or ""}
+                for r in rows
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/klaire/search-diagnoses")
+def klaire_search_diagnoses(q: str = "", limit: int = 50):
+    """Search diagnosis codes by code prefix or name fragment. Returns up to `limit` results."""
+    if not q or len(q.strip()) < 2:
+        return {"diagnoses": []}
+    try:
+        eng = get_engine()
+        term = q.strip().upper()
+        rows = eng.conn.execute("""
+            SELECT UPPER(TRIM(diagnosiscode)) AS code,
+                   TRIM(diagnosisdesc)        AS name
+            FROM "AI DRIVEN DATA".DIAGNOSIS
+            WHERE diagnosiscode IS NOT NULL AND TRIM(diagnosiscode) <> ''
+              AND (UPPER(TRIM(diagnosiscode)) LIKE ? OR UPPER(TRIM(diagnosisdesc)) LIKE ?)
+            ORDER BY
+                CASE WHEN UPPER(TRIM(diagnosiscode)) LIKE ? THEN 0 ELSE 1 END,
+                diagnosiscode
+            LIMIT ?
+        """, [f"{term}%", f"%{term}%", f"{term}%", limit]).fetchall()
+        def _dot(code: str) -> str:
+            if "." in code or len(code) <= 3:
+                return code
+            return code[:3] + "." + code[3:]
+        return {
+            "diagnoses": [
+                {"code": _dot(r[0]), "name": r[1]}
+                for r in rows if r[0] and r[1]
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/v1/klaire/diagnoses")
 def klaire_diagnoses():
     """Return diagnosis list from DIAGNOSIS_MASTER for the KLAIRE specialist dropdown."""

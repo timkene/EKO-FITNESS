@@ -85,22 +85,20 @@ def load_procedures():
     """Returns {display_label: {code, name, branch}} for PA procedure dropdown.
 
     branch is 'NO-AUTH', 'PRE-AUTH', or None (not in master → treated as PRE-AUTH).
+    Raises on error so that @st.cache_data does not cache an empty result.
     """
-    try:
-        r = requests.get(f"{API}/api/v1/klaire/procedures", timeout=10)
-        r.raise_for_status()
-        procs = r.json().get("procedures", [])
-        result = {}
-        for p in procs:
-            code   = p.get("procedure_code", "")
-            name   = p.get("procedure_name", code)
-            branch = p.get("branch")  # NO-AUTH | PRE-AUTH | None
-            cls    = p.get("procedure_class", "")
-            label  = f"{code} — {name}" + (f"  [{cls}]" if cls else "")
-            result[label] = {"code": code, "name": name, "branch": branch}
-        return result
-    except Exception:
-        return {}
+    r = requests.get(f"{API}/api/v1/klaire/procedures", timeout=10)
+    r.raise_for_status()
+    procs = r.json().get("procedures", [])
+    result = {}
+    for p in procs:
+        code   = p.get("procedure_code", "")
+        name   = p.get("procedure_name", code)
+        branch = p.get("branch")  # NO-AUTH | PRE-AUTH | None
+        cls    = p.get("procedure_class", "")
+        label  = f"{code} — {name}" + (f"  [{cls}]" if cls else "")
+        result[label] = {"code": code, "name": name, "branch": branch}
+    return result
 
 
 def _filter_procedures(enc_type: str, adm_status: str | None) -> dict:
@@ -111,7 +109,10 @@ def _filter_procedures(enc_type: str, adm_status: str | None) -> dict:
     - INPATIENT + NOT_ADMITTED:       branch == PRE-AUTH or branch is None (not in master); excludes NO-AUTH
     - INPATIENT + ADMITTED:           all procedures (no filter)
     """
-    all_procs = load_procedures()
+    try:
+        all_procs = load_procedures()
+    except Exception:
+        return {}
     if enc_type == "OUTPATIENT":
         return {k: v for k, v in all_procs.items() if v.get("branch") == "NO-AUTH"}
     if enc_type == "INPATIENT" and adm_status != "ADMITTED":
@@ -132,8 +133,57 @@ def load_specialist_codes():
         return {}
 
 
+@st.cache_data(ttl=86400)
+def load_providers() -> list:
+    """Return list of {id, name, state, lga} for sidebar dropdown."""
+    try:
+        r = requests.get(f"{API}/api/v1/klaire/providers", timeout=15)
+        r.raise_for_status()
+        return r.json().get("providers", [])
+    except Exception:
+        return []
+
+
+def _normalise_diag_code(code: str) -> str:
+    """Convert ICD-10 codes stored without dots (e.g. G4700) to dotted form (G47.00)."""
+    code = code.strip().upper()
+    if "." in code or len(code) <= 3:
+        return code
+    return code[:3] + "." + code[3:]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def resolve_diagnosis_codes(codes_tuple: tuple) -> dict:
+    """Resolve a tuple of ICD-10 codes to {code: name}. Cached per unique set of codes."""
+    result = {}
+    for code in codes_tuple:
+        code = code.strip().upper()
+        if not code:
+            continue
+        # Strip dot for DB query (stored as G4700, not G47.00)
+        query_code = code.replace(".", "")
+        try:
+            r = requests.get(
+                f"{API}/api/v1/klaire/search-diagnoses",
+                params={"q": query_code, "limit": 10},
+                timeout=5,
+            )
+            if r.ok:
+                for d in r.json().get("diagnoses", []):
+                    # Match either dotted or undotted form
+                    if d["code"].upper().replace(".", "") == query_code:
+                        result[code] = d["name"]
+                        break
+        except Exception:
+            pass
+        if code not in result:
+            result[code] = ""  # empty name — code not found but still usable
+    return result
+
+
 @st.cache_data(ttl=3600)
 def load_diagnoses():
+    """Load DIAGNOSIS_MASTER (small curated list) for non-PA dropdowns."""
     try:
         r = requests.get(f"{API}/api/v1/klaire/diagnoses", timeout=10)
         r.raise_for_status()
@@ -166,13 +216,7 @@ def _proc_code_to_name() -> dict:
 
 @st.cache_data(ttl=3600)
 def _diag_code_to_name() -> dict:
-    """code → name lookup from the full DIAGNOSIS table (broader than DIAGNOSIS_MASTER)."""
-    try:
-        r = requests.get(f"{API}/api/v1/klaire/all-diagnoses", timeout=15)
-        if r.ok:
-            return {d["code"]: d["name"] for d in r.json().get("diagnoses", [])}
-    except Exception:
-        pass
+    """code → name lookup from DIAGNOSIS_MASTER."""
     return {v["code"]: v["name"] for v in load_diagnoses().values()}
 
 
@@ -524,10 +568,21 @@ st.divider()
 # ── Sidebar — enrollee + provider ─────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 👤 Enrollee & Provider")
-    enrollee_id    = st.text_input("Enrollee ID *",       placeholder="CL/OCTA/723449/2023-A", key="s_enr")
-    provider_id    = st.text_input("Provider ID *",       placeholder="118",                   key="s_prov")
-    hospital_name  = st.text_input("Hospital / Facility", placeholder="General Hospital",      key="s_hosp")
-    encounter_date = st.date_input("Encounter Date",      value=date.today(),                  key="s_date")
+    enrollee_id    = st.text_input("Enrollee ID *", placeholder="CL/OCTA/723449/2023-A", key="s_enr")
+
+    _providers = load_providers()
+    _prov_options = [""] + [f"{p['name']} ({p['state']}) — {p['id']}" for p in _providers]
+    _prov_sel = st.selectbox(
+        "Provider *",
+        options=_prov_options,
+        index=0,
+        placeholder="Search provider name…",
+        key="s_prov_sel",
+    )
+    provider_id   = _prov_sel.rsplit("— ", 1)[-1].strip() if _prov_sel else ""
+    hospital_name = _prov_sel.split(" (")[0].strip()      if _prov_sel else ""
+
+    encounter_date = st.date_input("Encounter Date", value=date.today(), key="s_date")
     st.divider()
     st.caption("Complete all fields before submitting.")
 
@@ -874,7 +929,6 @@ elif "PA Request" in mode:
             st.markdown("#### 🏥 Admission Request")
             adm_codes = load_admission_codes()
             adm_code_options = {f"{c['code']} — {c['name']}": c["code"] for c in adm_codes}
-            adm_diag_options = load_diagnoses()
 
             adm_c1, adm_c2 = st.columns([1, 1])
             with adm_c1:
@@ -887,14 +941,17 @@ elif "PA Request" in mode:
             with adm_c2:
                 adm_days = st.number_input("Number of Days", min_value=1, value=1, step=1, key="pa_adm_days")
 
-            adm_diag_selected = st.multiselect(
-                "Admitting Diagnoses",
-                options=list(adm_diag_options.keys()),
-                placeholder="Select one or more admitting diagnoses…",
-                key="pa_adm_diags",
+            adm_diag_raw = st.text_input(
+                "Admitting Diagnosis Code(s)",
+                placeholder="e.g. J18.0  or  J18.0, B50.9",
+                key="pa_adm_diags_raw",
             )
-            adm_diag_codes = [adm_diag_options[d]["code"] for d in adm_diag_selected]
-            adm_diag_names = {adm_diag_options[d]["code"]: adm_diag_options[d]["name"] for d in adm_diag_selected}
+            adm_diag_codes = [c.strip().upper() for c in adm_diag_raw.split(",") if c.strip()]
+            if adm_diag_codes:
+                adm_diag_names = resolve_diagnosis_codes(tuple(adm_diag_codes))
+                st.caption("  ·  ".join(f"`{c}`{' — ' + adm_diag_names[c] if adm_diag_names.get(c) else ''}" for c in adm_diag_codes))
+            else:
+                adm_diag_names = {}
 
             bc1, bc2 = st.columns([2, 3])
             with bc1:
@@ -960,8 +1017,6 @@ elif "PA Request" in mode:
 
     _adm_status  = st.session_state.get("pa_admission_status")
     proc_options = _filter_procedures(enc_type, _adm_status)   # branch-filtered
-    diag_options = load_diagnoses()    # {display: {code, name}}
-
     # ── Item management via session state ─────────────────────────────────────
     if "pa_items" not in st.session_state:
         st.session_state["pa_items"] = [{"proc_display": "", "diags": []}]
@@ -1027,32 +1082,20 @@ elif "PA Request" in mode:
                     st.session_state["pa_items"][idx]["proc_name"] = proc_val.strip()
 
             with pc2:
-                if diag_options:
-                    selected_diags = st.multiselect(
-                        f"Diagnosis / Diagnoses #{idx + 1}",
-                        options=list(diag_options.keys()),
-                        default=[
-                            k for k in diag_options
-                            if diag_options[k]["code"] in item.get("diags", [])
-                        ],
-                        placeholder="Select one or more diagnoses…",
-                        key=f"pa_diags_{idx}",
-                    )
-                    st.session_state["pa_items"][idx]["diags"] = [
-                        diag_options[d]["code"] for d in selected_diags
-                    ]
-                    st.session_state["pa_items"][idx]["diag_names"] = {
-                        diag_options[d]["code"]: diag_options[d]["name"] for d in selected_diags
-                    }
+                raw_diags = st.text_input(
+                    f"Diagnosis Code(s) #{idx + 1}",
+                    value=", ".join(item.get("diags", [])),
+                    placeholder="e.g. G47.00  or  J18.0, B50.9",
+                    key=f"pa_diags_raw_{idx}",
+                )
+                codes = [c.strip().upper() for c in raw_diags.split(",") if c.strip()]
+                if codes:
+                    names = resolve_diagnosis_codes(tuple(codes))
+                    st.caption("  ·  ".join(f"`{c}`{' — ' + names[c] if names.get(c) else ''}" for c in codes))
                 else:
-                    raw = st.text_input(
-                        f"Diagnosis Code(s) #{idx + 1}",
-                        key=f"pa_diags_raw_{idx}",
-                        placeholder="e.g. J069, B969 (comma-separated)",
-                    )
-                    codes = [c.strip().upper() for c in raw.split(",") if c.strip()]
-                    st.session_state["pa_items"][idx]["diags"] = codes
-                    st.session_state["pa_items"][idx]["diag_names"] = {c: c for c in codes}
+                    names = {}
+                st.session_state["pa_items"][idx]["diags"] = codes
+                st.session_state["pa_items"][idx]["diag_names"] = names
 
             with pc3:
                 st.markdown("<br>", unsafe_allow_html=True)
@@ -1335,37 +1378,59 @@ elif "Agent Review" in mode:
                         reasons    = rv.get("review_reasons", [])
                         fl         = rv.get("first_line", {})
                         inj_check  = rv.get("injection_check", {})
+                        enrollee   = rv.get("enrollee_id") or "—"
+                        enc_date   = rv.get("encounter_date", "")
 
-                        if review_type == "PA_PREAUTH":
+                        # Derive overall AI recommendation from first-line result
+                        # (first-line is the primary AI signal; DENY first-line = AI says deny)
+                        fl_decision  = fl.get("decision", "APPROVE") if fl else "APPROVE"
+                        ai_rec       = fl_decision  # APPROVE or DENY
+                        ai_conf      = fl.get("confidence", 0) if fl else 0
+
+                        # Badge row
+                        badge_html = (
+                            '<span style="background:#7c3aed;color:#ede9fe;border-radius:4px;'
+                            'padding:2px 8px;font-size:0.8em;">💊 PA PRE-AUTH</span>'
+                            if review_type == "PA_PREAUTH" else
+                            '<span style="background:#4c1d95;color:#ddd6fe;border-radius:4px;'
+                            'padding:2px 8px;font-size:0.8em;">💊 PA NO-AUTH</span>'
+                        )
+                        st.markdown(badge_html, unsafe_allow_html=True)
+
+                        st.markdown(
+                            f"**{proc_code}** — {proc_name}  \n"
+                            f"Enrollee: `{enrollee}`"
+                            + (f"  ·  {enc_date}" if enc_date else "")
+                        )
+
+                        # ── Explicit AI recommendation box ─────────────────
+                        if ai_rec == "DENY":
                             st.markdown(
-                                '<span style="background:#7c3aed;color:#ede9fe;border-radius:4px;'
-                                'padding:2px 8px;font-size:0.8em;">💊 PA PRE-AUTH</span>',
+                                f'<div style="background:#2d0a0a;border:1px solid #dc2626;'
+                                f'border-radius:8px;padding:10px 16px;margin:8px 0;">'
+                                f'<strong style="color:#f87171;font-size:1em;">🤖 AI Recommendation: DENY</strong>'
+                                f'<span style="color:#fca5a5;font-size:0.85em;margin-left:8px;">({ai_conf}% confidence)</span><br>'
+                                f'<span style="color:#fecaca;font-size:0.88em;">{fl.get("reasoning","")}</span>'
+                                f'</div>',
                                 unsafe_allow_html=True,
                             )
                         else:
                             st.markdown(
-                                '<span style="background:#4c1d95;color:#ddd6fe;border-radius:4px;'
-                                'padding:2px 8px;font-size:0.8em;">💊 PA NO-AUTH</span>',
+                                f'<div style="background:#052e16;border:1px solid #16a34a;'
+                                f'border-radius:8px;padding:10px 16px;margin:8px 0;">'
+                                f'<strong style="color:#4ade80;font-size:1em;">🤖 AI Recommendation: APPROVE</strong>'
+                                f'<span style="color:#86efac;font-size:0.85em;margin-left:8px;">({ai_conf}% confidence)</span><br>'
+                                f'<span style="color:#bbf7d0;font-size:0.88em;">{fl.get("reasoning","")}</span>'
+                                f'</div>',
                                 unsafe_allow_html=True,
                             )
-                        st.markdown(
-                            f"**{proc_code}** — {proc_name}  \n"
-                            f"Enrollee: `{rv.get('enrollee_id','')}`"
-                        )
+
                         if approved:
                             pills = "  ".join(f'`{c}` {diag_names.get(c, c)}' for c in approved)
                             st.markdown(f"✅ Approved diagnoses: {pills}")
                         if denied:
                             pills = "  ".join(f'`{c}` {diag_names.get(c, c)}' for c in denied)
                             st.markdown(f"❌ Delisted diagnoses: {pills}")
-                        if fl:
-                            fl_col = "#22c55e" if fl.get("decision") == "APPROVE" else "#ef4444"
-                            st.markdown(
-                                f'<span style="color:#94a3b8;font-size:0.88em;">First-line: '
-                                f'<strong style="color:{fl_col};">{fl.get("decision","")}</strong>'
-                                f' ({fl.get("confidence",0)}%) — {fl.get("reasoning","")}</span>',
-                                unsafe_allow_html=True,
-                            )
 
                         # Rule 12 injection advisory
                         if inj_check.get("triggered"):
@@ -1655,7 +1720,6 @@ elif flow == "SPECIALIST":
     )
 
     spec_options = load_specialist_codes()
-    diag_options = load_diagnoses()
 
     with st.container(border=True):
         # ── STEP 2 — Specialist selection ─────────────────────────────────────
@@ -1677,18 +1741,19 @@ elif flow == "SPECIALIST":
 
         # ── STEP 3 — Diagnosis selection ──────────────────────────────────────
         st.markdown("**Step 3 — Select Diagnosis**")
-        if diag_options:
-            diag_display = st.selectbox(
-                "Diagnosis (one only)",
-                options=["— Select diagnosis —"] + list(diag_options.keys()),
-                key="diag_sel",
-                label_visibility="collapsed",
-            )
-            diag_info = diag_options.get(diag_display) if diag_display != "— Select diagnosis —" else None
+        spec_diag_raw = st.text_input(
+            "Diagnosis code",
+            placeholder="e.g. B50.9",
+            key="spec_diag_raw",
+            label_visibility="collapsed",
+        )
+        _spec_code = spec_diag_raw.strip().upper()
+        if _spec_code:
+            _spec_names = resolve_diagnosis_codes((_spec_code,))
+            st.caption(f"`{_spec_code}`{' — ' + _spec_names[_spec_code] if _spec_names.get(_spec_code) else ''}")
+            diag_info = {"code": _spec_code, "name": _spec_names.get(_spec_code, _spec_code)}
         else:
-            st.warning("Diagnosis list unavailable. Enter manually.")
-            diag_raw  = st.text_input("Diagnosis code", placeholder="e.g. B509", key="diag_manual")
-            diag_info = {"code": diag_raw.strip().upper(), "name": diag_raw.strip()} if diag_raw.strip() else None
+            diag_info = None
 
     st.markdown("---")
 
