@@ -573,17 +573,36 @@ def update_first_line_decision(
 
 def is_learning_trusted(doc: dict) -> bool:
     """
-    An entry is trusted for auto-decisions (no human intervention needed) if:
-      a) admin_approved == True  (supervisor approved once), OR
-      b) usage_count >= 3 AND the entry was human-confirmed (approved_by or source='human')
+    Dynamic trust threshold for auto-decisions.
 
-    Anything below this threshold must still pass through a human reviewer.
+    a) admin_approved == True  → always trusted (supervisor override)
+    b) Human-confirmed (approved_by set or source='human') + usage-based threshold:
+         usage >= 50  → trusted after 1 confirmation  (very stable, high-frequency pair)
+         usage >= 20  → trusted after 2 confirmations
+         usage >= 3   → trusted after 3 confirmations  (default)
+         usage < 3    → never auto-trusted
+
+    Higher frequency = more evidence the AI decision is stable = lower threshold.
+    This reduces review queue for common pairs (amoxicillin + URTI seen 100×)
+    while keeping tighter oversight for rarely-seen combinations.
     """
     if doc.get("admin_approved") is True:
         return True
     usage = int(doc.get("usage_count", 0))
+    if usage < 3:
+        return False
     human_confirmed = bool(doc.get("approved_by")) or doc.get("source") == "human"
-    return usage >= 3 and human_confirmed
+    if not human_confirmed:
+        return False
+    # Dynamic: reduce required confirmations as frequency grows
+    if usage >= 50:
+        required_confirmations = 1
+    elif usage >= 20:
+        required_confirmations = 2
+    else:
+        required_confirmations = 3
+    confirmations = int(doc.get("human_confirmation_count", 1 if human_confirmed else 0))
+    return confirmations >= required_confirmations
 
 
 # ── Admin learning-table management ──────────────────────────────────────────
@@ -618,7 +637,7 @@ _UNTRUSTED_FILTER = {
 
 
 def _is_trusted(doc: dict) -> bool:
-    return bool(doc.get("admin_approved")) or int(doc.get("usage_count", 0)) >= 3
+    return is_learning_trusted(doc)
 
 
 def get_all_learnings(limit: int = 500) -> list:

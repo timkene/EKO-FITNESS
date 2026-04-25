@@ -11,15 +11,20 @@ Handles multiple diagnoses per procedure with merge logic:
 Rules applied (capitation and 14-day visit already handled at consultation stage):
   1. Procedure Age
   2. Procedure Gender
-  3. Diagnosis Age          ← per-diagnosis, merge applied
-  4. Diagnosis Gender       ← per-diagnosis, merge applied
-  5. Procedure-Diagnosis Compatibility  ← per-diagnosis, merge applied
+  3. Diagnosis Age                        ← per-diagnosis, merge applied
+  4. Diagnosis Gender                     ← per-diagnosis, merge applied
+  5. Procedure-Diagnosis Compatibility    ← per-diagnosis, merge applied
   6. Procedure 30-Day Duplicate
   7. Clinical Necessity (AI)
   8. Diagnosis Stacking
   9. Clinical Necessity (ClinicalNecessityEngine — admission auto-detect, route, step-therapy, tests)
+     ↑ SHORT-CIRCUIT: skipped if rules 1-8 already denied (saves AI tokens)
  10. Disease Combination Check (AI — request-level, no learning)
+ 11. Diagnosis-Encounter Mismatch (AI — upcoding detection, outpatient only)
  12. Injection Without Admission (pre-auth, non-admitted only)
+ 13. Drug-Drug Interaction check (OpenFDA + AI — DRG codes only)
+ 14. Quantity vs Diagnosis Appropriateness (rules-based + AI fallback)
+ 15. Post-Discharge Overlap (DB — labs billed within 14 days of discharge)
 
 Trust model:
   - Master table / trusted learning table → auto-decide (no agent needed)
@@ -30,7 +35,9 @@ import os
 import json
 import logging
 import uuid
-from datetime import datetime
+import urllib.request
+import urllib.parse
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from . import mongo_db
@@ -375,17 +382,18 @@ def _validate_one_procedure(
     all_failed    = len(passing_diags) == 0
     any_diag_ai   = any(d["has_ai"] for d in diag_detail.values())
 
-    # ── Clinical necessity check (engine-based, replaces simple first-line check)
-    # Uses ClinicalNecessityEngine which:
-    #   1. Auto-detects admission from ADM01/02/03 in PA DATA (independent of provider claim)
-    #   2. Detects route (injectable/oral) and checks if oral was tried first
-    #   3. Fetches 30-day prior meds for step-therapy justification
-    #   4. Fetches 3-day test history for prerequisite confirmatory tests
-    # Falls back to simple check if engine fails.
+    # ── Clinical necessity check ─────────────────────────────────────────────────
+    # SHORT-CIRCUIT: skip the expensive AI call if cheap master-table rules already
+    # denied this procedure. Clinical necessity only matters if the procedure+diagnosis
+    # pairing is otherwise valid.
     anchor_diag      = diag_codes[0] if diag_codes else ""
     anchor_diag_name = diag_names.get(anchor_diag, anchor_diag)
-    first_line: Dict = {}
-    if anchor_diag and enrollee_id and encounter_date:
+    first_line: Dict = {"decision": "APPROVE", "is_first_line": True, "confidence": 100,
+                        "reasoning": "Skipped — prior rule already denied.", "source": "skip",
+                        "requires_review": False, "auto": True}
+
+    _skip_necessity = (not proc_level_passed) or all_failed
+    if not _skip_necessity and anchor_diag and enrollee_id and encounter_date:
         try:
             from .clinical_necessity import ClinicalNecessityEngine
             _cne    = ClinicalNecessityEngine(conn=engine.conn)
@@ -419,12 +427,14 @@ def _validate_one_procedure(
                 diagnosis_code=anchor_diag, diagnosis_name=anchor_diag_name,
                 encounter_type=encounter_type,
             )
-    else:
+    elif not _skip_necessity:
+        # anchor_diag missing — fall back to simple check
         first_line = check_first_line_treatment(
             procedure_code=proc_code, procedure_name=proc_name,
             diagnosis_code=anchor_diag, diagnosis_name=anchor_diag_name,
             encounter_type=encounter_type,
         )
+    # else: _skip_necessity=True → first_line already set to skip sentinel above
 
     # ── Rule 12 — Injection Without Admission (pre-auth, non-admitted only) ──────
     # Also fires when ClinicalNecessityEngine detected the route is injectable
@@ -448,9 +458,7 @@ def _validate_one_procedure(
             proc_code, proc_name, proc_class, diag_codes, diag_names
         )
 
-    # ── Quantity check ────────────────────────────────────────────────────────
-    # Only master table max is authoritative. If no master max, pass through as-is.
-    # Quantity cap is a silent auto-correction — never escalates to agent review.
+    # ── Quantity cap (master table max — silent correction) ───────────────────
     max_qty      = engine.get_max_quantity(proc_code)
     qty_source   = "master"
     qty_reason   = ""
@@ -458,6 +466,33 @@ def _validate_one_procedure(
     qty_adjusted = adjusted_qty < quantity
     if qty_adjusted:
         logger.info(f"QTY CAP {proc_code}: {quantity} → {adjusted_qty} (master max: {max_qty})")
+
+    # ── Rule 14 — Quantity vs diagnosis clinical appropriateness ──────────────
+    # Checks if the quantity submitted is clinically reasonable for the diagnosis.
+    # Fast rules-based for known drug classes; AI fallback for unknowns.
+    qty_appropriateness: Dict = {"flagged": False}
+    if adjusted_qty > 1 and anchor_diag:
+        qty_appropriateness = check_quantity_appropriateness(
+            proc_code=proc_code,
+            proc_name=proc_name,
+            proc_class=proc_class or "",
+            diagnosis_code=anchor_diag,
+            diagnosis_name=anchor_diag_name,
+            quantity=adjusted_qty,
+            encounter_type=encounter_type,
+        )
+
+    # ── Rule 13 — Drug-Drug Interaction check (OpenFDA + AI) ─────────────────
+    # Only runs for drug procedures (DRG prefix) that haven't already been denied.
+    ddi_check: Dict = {"triggered": False}
+    if proc_code.upper().startswith("DRG") and enrollee_id and encounter_date:
+        ddi_check = check_drug_drug_interactions(
+            proc_code=proc_code,
+            proc_name=proc_name,
+            enrollee_id=enrollee_id,
+            encounter_date=encounter_date,
+            conn=engine.conn,
+        )
 
     # ── Price override check ──────────────────────────────────────────────────
     price_override = (
@@ -535,6 +570,31 @@ def _validate_one_procedure(
         if decision != "DENY":
             decision = "PENDING_REVIEW"
 
+    # Rule 13 — DDI advisory
+    if ddi_check.get("triggered"):
+        requires_review = True
+        combos = "; ".join(
+            f"{c['prior_drug']} ({c['reason']})"
+            for c in ddi_check.get("flagged_combinations", [])
+        )
+        review_reasons.append(
+            f"Drug Interaction [{ddi_check.get('severity','').upper()}]: {proc_name} + prior meds — "
+            f"{combos or ddi_check.get('reasoning', '')}"
+        )
+        if decision != "DENY":
+            decision = "PENDING_REVIEW"
+
+    # Rule 14 — quantity clinical appropriateness
+    if qty_appropriateness.get("flagged"):
+        requires_review = True
+        rec = qty_appropriateness.get("recommended_quantity")
+        rec_str = f" (recommended max: {rec})" if rec else ""
+        review_reasons.append(
+            f"Quantity Concern: {qty_appropriateness.get('reasoning', '')}{rec_str}"
+        )
+        if decision != "DENY":
+            decision = "PENDING_REVIEW"
+
     # Pre-Auth: force all non-DENY to PENDING_REVIEW — AI advises only, agent decides
     if encounter_type == "INPATIENT" and decision != "DENY":
         decision = "PENDING_REVIEW"
@@ -590,6 +650,8 @@ def _validate_one_procedure(
             "comment":             comment or "",
             "first_line":          first_line,
             "injection_check":     injection_check,
+            "ddi_check":           ddi_check,
+            "qty_appropriateness": qty_appropriateness,
             "review_reasons":      review_reasons,
             "status":              "PENDING_REVIEW",
             "reviewed_by":         None,
@@ -618,10 +680,323 @@ def _validate_one_procedure(
         "proc_rules":          [_r(r) for r in proc_rules],
         "first_line":          first_line,
         "injection_check":     injection_check,
+        "ddi_check":           ddi_check,
+        "qty_appropriateness": qty_appropriateness,
         "requires_agent_review": requires_review,
         "review_reasons":      review_reasons,
         "review_id":           review_id,
     }
+
+
+# ── Drug-Drug Interaction Check (OpenFDA + AI) ───────────────────────────────
+
+_OPENFDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
+
+
+def _openfda_get_interactions(drug_name: str) -> str:
+    """
+    Query OpenFDA for the drug_interactions section of a drug's label.
+    Returns the interaction text, or empty string on failure/not found.
+    Strips generic names from brand/dosage strings like 'Amlodipine 10mg' → 'amlodipine'.
+    """
+    # Strip dosage and route: "Amlodipine 10mg" → "amlodipine"
+    import re as _re
+    clean = _re.sub(r'\s+\d+[\s./]*(mg|mcg|g|ml|iu|units?|tabs?|caps?)\b.*', '', drug_name, flags=_re.I).strip()
+    if len(clean) < 3:
+        return ""
+    try:
+        q   = urllib.parse.quote(f'"{clean}"')
+        url = f"{_OPENFDA_LABEL_URL}?search=openfda.generic_name:{q}&limit=1"
+        req = urllib.request.Request(url, headers={"User-Agent": "Clearline-KLAIRE/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        results = data.get("results", [])
+        if not results:
+            # Fallback: search by drug name in full text
+            q2  = urllib.parse.quote(clean)
+            url = f"{_OPENFDA_LABEL_URL}?search=drug_interactions:{q2}&limit=1"
+            req = urllib.request.Request(url, headers={"User-Agent": "Clearline-KLAIRE/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+            results = data.get("results", [])
+        if not results:
+            return ""
+        interactions = results[0].get("drug_interactions", [])
+        return " ".join(interactions[:3])   # cap at 3 sections to stay within token budget
+    except Exception as e:
+        logger.debug(f"OpenFDA DDI lookup failed for '{drug_name}': {e}")
+        return ""
+
+
+def check_drug_drug_interactions(
+    proc_code: str,
+    proc_name: str,
+    enrollee_id: str,
+    encounter_date: str,
+    conn,
+) -> Dict:
+    """
+    Rule 13 — Drug-Drug Interaction check.
+
+    Only runs for drug procedures (DRG prefix).
+    1. Fetches 30-day prior medications from PA DATA.
+    2. Queries OpenFDA for the current drug's known interaction warnings.
+    3. If interaction text found, asks Claude whether any prior med is dangerous.
+
+    Never auto-denies. Flags PENDING_REVIEW + advisory if a dangerous combination found.
+    """
+    if not proc_code.upper().startswith("DRG") or not enrollee_id or not encounter_date:
+        return {"triggered": False}
+
+    # Fetch 30-day prior meds
+    prior_meds: List[Dict] = []
+    try:
+        enc_dt   = datetime.strptime(encounter_date[:10], "%Y-%m-%d").date()
+        lookback = (enc_dt - timedelta(days=30)).strftime("%Y-%m-%d")
+        rows = conn.execute("""
+            SELECT UPPER(TRIM(p.code)) as code,
+                   COALESCE(TRIM(pd.proceduredesc), UPPER(TRIM(p.code))) as name,
+                   CAST(p.requestdate AS DATE) as med_date
+            FROM "AI DRIVEN DATA"."PA DATA" p
+            LEFT JOIN "AI DRIVEN DATA"."PROCEDURE DATA" pd
+                ON LOWER(TRIM(pd.procedurecode)) = LOWER(TRIM(p.code))
+            WHERE p.IID = ?
+              AND UPPER(LEFT(TRIM(p.code), 3)) = 'DRG'
+              AND CAST(p.requestdate AS DATE) >= ?
+              AND CAST(p.requestdate AS DATE) < ?
+        """, [enrollee_id, lookback, encounter_date]).fetchall()
+        prior_meds = [{"code": r[0], "name": r[1], "date": str(r[2])} for r in rows]
+    except Exception as e:
+        logger.warning(f"DDI: prior meds fetch failed: {e}")
+
+    if not prior_meds:
+        return {"triggered": False}
+
+    # Get interaction text from OpenFDA
+    interaction_text = _openfda_get_interactions(proc_name)
+    if not interaction_text:
+        return {"triggered": False, "note": "No OpenFDA interaction data found"}
+
+    # Ask Claude to match prior meds against the interaction warning
+    prior_list = "\n".join(f"  - {m['code']}: {m['name']} (on {m['date']})" for m in prior_meds[-20:])
+    prompt = f"""You are a clinical pharmacist reviewing a Nigerian HMO PA request for drug safety.
+
+The patient is being prescribed:
+  {proc_code}: {proc_name}
+
+This drug's known interaction warnings (from FDA label):
+{interaction_text[:1200]}
+
+The patient's prior medications (last 30 days from PA records):
+{prior_list}
+
+Task: identify if any prior medication is listed as a dangerous interaction with the requested drug.
+Only flag CLINICALLY SIGNIFICANT interactions (major/severe — not theoretical or minor).
+Ignore interactions with drugs not present in the prior medication list.
+
+Respond in JSON only (no markdown):
+{{
+  "interaction_found": true or false,
+  "flagged_combinations": [
+    {{
+      "prior_drug": "name",
+      "reason": "one sentence — why this combination is dangerous"
+    }}
+  ],
+  "severity": "major" or "moderate" or "minor" or "none",
+  "reasoning": "One sentence summary."
+}}"""
+
+    ai = _call_claude(prompt)
+    found    = bool(ai.get("interaction_found", False))
+    flagged  = ai.get("flagged_combinations", [])
+    severity = ai.get("severity", "none")
+    reasoning = ai.get("reasoning", "")
+
+    return {
+        "triggered":           found,
+        "flagged_combinations": flagged,
+        "severity":            severity,
+        "reasoning":           reasoning,
+        "requires_review":     found,
+        "source":              "openfda+ai",
+    }
+
+
+# ── Quantity vs Diagnosis Clinical Appropriateness ────────────────────────────
+
+# Fast rules-based checks: (proc_name_keyword, max_outpatient_days, label)
+_QTY_RULES = [
+    # Antibiotics — outpatient courses should be 5-14 days max
+    (["CIPROFLOXACIN", "CIPROFLOX"],                    10,  "Ciprofloxacin courses are typically 5–7 days for uncomplicated UTI"),
+    (["METRONIDAZOLE", "METRONID"],                     10,  "Metronidazole courses are typically 5–7 days"),
+    (["AMOXICILLIN", "AMOXYCLAV", "AUGMENTIN"],         14,  "Amoxicillin/Augmentin courses are typically 5–10 days"),
+    (["CEFUROXIME", "CEFIXIME", "CEFALEXIN", "CEPHALEXIN"], 14, "Oral cephalosporins are typically 7–14 day courses"),
+    (["AZITHROMYCIN", "ZITHROMAX"],                      5,  "Azithromycin is typically a 3–5 day course"),
+    (["DOXYCYCLINE"],                                   14,  "Doxycycline for most infections is 7–14 days"),
+    # Steroids — short courses only unless chronic condition
+    (["PREDNISOLONE", "PREDNISONE"],                    14,  "Prednisolone outpatient courses should be ≤14 days without specialist oversight"),
+    (["DEXAMETHASONE"],                                  7,  "Dexamethasone short courses are typically ≤7 days outpatient"),
+    # IV fluids outpatient — physically impossible in large quantities
+    (["NORMAL SALINE", "RINGERS", "RINGER'S", "DEXTROSE", "IV FLUID", "HARTMANN"],
+                                                         5,  "IV fluid bags in large quantities are only feasible on admission"),
+    # Antimalarials
+    (["ARTEMETHER", "ARTESUNATE", "COARTEM", "LUMEFANTRINE"], 3, "ACT courses are 3 days"),
+]
+
+
+def check_quantity_appropriateness(
+    proc_code: str,
+    proc_name: str,
+    proc_class: str,
+    diagnosis_code: str,
+    diagnosis_name: str,
+    quantity: int,
+    encounter_type: str = "OUTPATIENT",
+) -> Dict:
+    """
+    Rule 14 — Quantity vs diagnosis clinical appropriateness.
+
+    Fast rules-based check first (no AI cost). AI fallback for unknown procedures.
+    Only flags quantities that are clinically implausible — never the master max cap.
+    Never auto-denies. Always PENDING_REVIEW if flagged.
+    """
+    if quantity <= 1:
+        return {"flagged": False}
+
+    name_upper = proc_name.upper()
+
+    # Fast rules-based pass
+    for keywords, max_days, label in _QTY_RULES:
+        if any(kw in name_upper for kw in keywords):
+            if encounter_type == "OUTPATIENT" and quantity > max_days:
+                return {
+                    "flagged":              True,
+                    "recommended_quantity": max_days,
+                    "reasoning":            f"{label} — {quantity} units submitted exceeds typical course length.",
+                    "source":               "rules",
+                    "requires_review":      True,
+                }
+            return {"flagged": False, "source": "rules"}  # known drug, quantity within range
+
+    # AI check for drug procedures not covered by fast rules
+    if not proc_code.upper().startswith("DRG") or quantity < 10:
+        return {"flagged": False}
+
+    prompt = f"""You are a clinical pharmacist reviewing a Nigerian HMO PA request.
+
+Procedure: {proc_code} — {proc_name} (class: {proc_class or 'unknown'})
+Diagnosis:  {diagnosis_code} — {diagnosis_name}
+Quantity submitted: {quantity} unit(s)
+Encounter type: {encounter_type}
+
+Is this quantity clinically appropriate for the standard treatment course for this diagnosis in Nigerian HMO practice?
+
+Flag ONLY if the quantity is clearly excessive (more than 1.5× the maximum standard course).
+Do NOT flag for: chronic conditions needing long-term medication, specialty drugs, imaging, procedures.
+
+Respond in JSON only (no markdown):
+{{
+  "flagged": true or false,
+  "recommended_max_quantity": integer or null,
+  "reasoning": "one sentence"
+}}"""
+
+    ai = _call_claude(prompt)
+    flagged = bool(ai.get("flagged", False))
+    return {
+        "flagged":              flagged,
+        "recommended_quantity": ai.get("recommended_max_quantity"),
+        "reasoning":            ai.get("reasoning", ""),
+        "source":               "ai",
+        "requires_review":      flagged,
+    }
+
+
+# ── Post-Discharge Overlap Check ──────────────────────────────────────────────
+
+_LAB_KEYWORDS = (
+    "BLOOD COUNT", "FBC", "CBC", "HAEMATOLOGY",
+    "WIDAL", "MALARIA", "PARASITE", "MP TEST",
+    "URINALYSIS", "URINE M/C", "URINE MCS",
+    "GLUCOSE", "RBS", "FBS", "FASTING BLOOD",
+    "CULTURE", "SENSITIVITY", "MCS",
+    "LIVER FUNCTION", "RENAL FUNCTION", "KIDNEY FUNCTION",
+    "ELECTROLYTE", "E/U/CR", "UREA", "CREATININE",
+    "THYROID", "TSH", "T3", "T4",
+    "HEPATITIS", "HIV", "VIRAL LOAD",
+    "X-RAY", "XRAY", "CHEST X", "ULTRA SOUND", "ULTRASOUND", "SCAN",
+    "ECG", "ELECTROCARDIOGRAM",
+    "PCV", "PACKED CELL", "WBC",
+)
+
+
+def check_post_discharge_overlap(
+    enrollee_id: str,
+    encounter_date: str,
+    proc_code: str,
+    proc_name: str,
+    conn,
+    lookback_days: int = 14,
+) -> Dict:
+    """
+    Rule 15 — Post-discharge investigation overlap.
+
+    If the enrollee was discharged from admission within the last 14 days,
+    lab/radiology investigations in this request were likely already performed
+    during the admission and should not be billed again.
+
+    Returns: {triggered, discharge_date, days_since, reason}
+    """
+    if not enrollee_id or not encounter_date:
+        return {"triggered": False}
+
+    # Only applies to investigations (labs, radiology, ECG, etc.)
+    name_upper = proc_name.upper()
+    is_investigation = any(kw in name_upper for kw in _LAB_KEYWORDS)
+    if not is_investigation:
+        return {"triggered": False}
+
+    try:
+        enc_dt   = datetime.strptime(encounter_date[:10], "%Y-%m-%d").date()
+        lookback = (enc_dt - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+        enc_str  = enc_dt.strftime("%Y-%m-%d")
+
+        row = conn.execute("""
+            SELECT MAX(CAST(requestdate AS DATE)) as last_adm,
+                   COALESCE(MAX(TRY_CAST(quantity AS INTEGER)), 1) as days_granted
+            FROM "AI DRIVEN DATA"."PA DATA"
+            WHERE IID = ?
+              AND UPPER(LEFT(TRIM(code), 3)) = 'ADM'
+              AND CAST(requestdate AS DATE) >= ?
+              AND CAST(requestdate AS DATE) < ?
+        """, [enrollee_id, lookback, enc_str]).fetchone()
+
+        if not (row and row[0]):
+            return {"triggered": False}
+
+        adm_date     = row[0] if hasattr(row[0], 'date') else datetime.strptime(str(row[0])[:10], "%Y-%m-%d").date()
+        days_granted = int(row[1]) if row[1] else 1
+        discharge_dt = adm_date + timedelta(days=days_granted)
+        days_since   = (enc_dt - discharge_dt).days
+
+        # Only flag if the current encounter is AFTER discharge but within lookback window
+        if discharge_dt < enc_dt <= adm_date + timedelta(days=lookback_days):
+            return {
+                "triggered":     True,
+                "discharge_date": str(discharge_dt),
+                "days_since":    days_since,
+                "reason": (
+                    f"Enrollee was discharged {days_since} day(s) ago (discharge: {discharge_dt}). "
+                    f"{proc_name} is a lab/investigation that was likely performed during the admission "
+                    f"and cannot be billed separately within {lookback_days} days of discharge."
+                ),
+                "requires_review": True,
+            }
+    except Exception as e:
+        logger.warning(f"check_post_discharge_overlap error: {e}")
+
+    return {"triggered": False}
 
 
 # ── Diagnosis-Encounter Mismatch Check ───────────────────────────────────────
@@ -934,8 +1309,31 @@ def validate_pa_request(
                 name = item.get("diagnosis_names", {}).get(code, code)
                 all_diags_for_combo.append({"code": code, "name": name})
 
-    combo_check = check_disease_combination(all_diags_for_combo, encounter_type)
+    combo_check    = check_disease_combination(all_diags_for_combo, encounter_type)
     mismatch_check = check_diagnosis_encounter_mismatch(all_diags_for_combo, encounter_type)
+
+    # ── Rule 15 — Post-discharge overlap (per procedure) ──────────────────────
+    # Run once per unique procedure. Flags labs/investigations submitted within
+    # 14 days of a prior admission discharge — likely already covered by the admission.
+    post_discharge_flags: List[Dict] = []
+    for item, res in zip(items, results):
+        pc = item["procedure_code"].strip().upper()
+        pn = res.get("procedure_name", pc)
+        pd_check = check_post_discharge_overlap(
+            enrollee_id=enrollee_id,
+            encounter_date=encounter_date,
+            proc_code=pc,
+            proc_name=pn,
+            conn=engine.conn,
+        )
+        if pd_check.get("triggered"):
+            post_discharge_flags.append({"procedure_code": pc, "procedure_name": pn, **pd_check})
+            # Escalate this individual result to PENDING_REVIEW
+            for r in results:
+                if r.get("procedure_code", "").upper() == pc and r.get("decision") != "DENY":
+                    r["decision"] = "PENDING_REVIEW"
+                    r["requires_agent_review"] = True
+                    r.setdefault("review_reasons", []).append(pd_check["reason"])
 
     # ── Procedure Combination Necessity Check (request-level) ─────────────────
     # Build procedure list with their approved diagnoses for the AI to reason over
@@ -1047,6 +1445,8 @@ def validate_pa_request(
         overall = "PENDING_REVIEW"
     if mismatch_check["requires_review"] and overall not in ("DENY", "PENDING_REVIEW"):
         overall = "PENDING_REVIEW"
+    if post_discharge_flags and overall not in ("DENY", "PENDING_REVIEW"):
+        overall = "PENDING_REVIEW"
 
     return {
         "overall_decision":        overall,
@@ -1059,8 +1459,10 @@ def validate_pa_request(
         "disease_combination":     combo_check,
         "procedure_combination":   proc_combo_check,
         "diagnosis_encounter_mismatch": mismatch_check,
+        "post_discharge_flags":    post_discharge_flags,
         "requires_agent_review":   any(r.get("requires_agent_review") for r in results)
                                    or combo_check["requires_review"]
                                    or proc_combo_check["requires_review"]
-                                   or mismatch_check["requires_review"],
+                                   or mismatch_check["requires_review"]
+                                   or bool(post_discharge_flags),
     }

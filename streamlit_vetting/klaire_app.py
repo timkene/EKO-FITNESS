@@ -1376,6 +1376,22 @@ elif "PA Request" in mode:
                 unsafe_allow_html=True,
             )
 
+        # ── Post-Discharge Overlap banner ──────────────────────────────────────
+        pd_flags = pa_result.get("post_discharge_flags", [])
+        if pd_flags:
+            flag_lines = "".join(
+                f'<br><span style="color:#fed7aa;font-size:0.8em;">• <strong>{f.get("procedure_code","?")}</strong> {f.get("procedure_name","")}: {f.get("reason","")}</span>'
+                for f in pd_flags
+            )
+            st.markdown(
+                f'<div style="background:#431407;border-left:4px solid #f97316;'
+                f'border-radius:8px;padding:12px 16px;margin-bottom:12px;">'
+                f'<strong style="color:#fed7aa;">⚠️ Post-Discharge Billing Alert</strong><br>'
+                f'<span style="color:#fdba74;font-size:0.85em;">The following investigations may have been performed during a recent admission and cannot be billed separately.</span>'
+                + flag_lines + '</div>',
+                unsafe_allow_html=True,
+            )
+
         for proc_res in pa_result.get("items", []):
             _render_pa_item(proc_res, pa_result.get("encounter_type", "OUTPATIENT"))
 
