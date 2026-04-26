@@ -1496,6 +1496,16 @@ class KlaireConsultRequest(BaseModel):
     specialist_code: Optional[str] = Field(None, description="CONS code for the specialist (e.g. CONS035)")
     diagnosis_code: Optional[str] = Field(None, description="ICD-10 / internal diagnosis code")
     diagnosis_name: Optional[str] = Field(None, description="Human-readable diagnosis name")
+    # Same-day GP referral: pass the GP PA reference if the GP and specialist
+    # are being submitted together in the same session (GP not yet in PA DATA).
+    same_day_gp_pa_ref: Optional[str] = Field(
+        None,
+        description=(
+            "PA reference / approval code for the GP consultation submitted in the same session. "
+            "Provide this when the GP and specialist requests are submitted together so the system "
+            "can confirm the same-day referral even before the GP is stored in PA DATA."
+        ),
+    )
 
 
 @app.post("/api/v1/klaire/consult")
@@ -1530,14 +1540,15 @@ def klaire_consult(request: KlaireConsultRequest):
         if not request.specialist_code:
             raise HTTPException(status_code=422, detail="specialist_code is required for SPECIALIST consultations")
         result = evaluate_specialist_consultation(
-            enrollee_id    = request.enrollee_id,
-            provider_id    = request.provider_id or "",
-            hospital_name  = request.hospital_name or "",
-            encounter_date = enc_date,
-            specialist_code= request.specialist_code,
-            diagnosis_code = _norm_diag(request.diagnosis_code or ""),
-            diagnosis_name = request.diagnosis_name or "",
-            db_path        = db_path,
+            enrollee_id         = request.enrollee_id,
+            provider_id         = request.provider_id or "",
+            hospital_name       = request.hospital_name or "",
+            encounter_date      = enc_date,
+            specialist_code     = request.specialist_code,
+            diagnosis_code      = _norm_diag(request.diagnosis_code or ""),
+            diagnosis_name      = request.diagnosis_name or "",
+            db_path             = db_path,
+            same_day_gp_pa_ref  = request.same_day_gp_pa_ref,
         )
 
         # Fire QA alert email (non-blocking) if 30-day flag triggered
@@ -1892,46 +1903,35 @@ def get_admission_codes():
 @app.post("/api/v1/klaire/admission")
 def klaire_admission(req: KlaireAdmissionRequest):
     """
-    Submit an admission request for agent approval.
-    AI advises on appropriateness; agent makes the final call.
-    Returns review_id — agent acts on it in the Agent Review tab.
+    Submit an inpatient admission request.
+
+    Flow:
+      1. Rule-based pre-checks (severity, room type, duration, readmission).
+      2. DENY  → stored as DENIED immediately, no AI call, no agent queue.
+      3. APPROVE → stored as APPROVED immediately, no agent queue.
+      4. PENDING_REVIEW → AI advisory call, stored for agent review.
+
+    Returns review_id and the pre-check outcome.
     """
     from .klaire_pa import _call_claude
+    from .klaire_admission import run_admission_prechecks
+
     room_name = ADMISSION_CODES[req.admission_code]
-    diag_list = ", ".join(
-        f"{c} ({req.admitting_diagnosis_names.get(c, c)})"
-        for c in req.admitting_diagnosis_codes
+    eng       = get_engine()
+
+    # ── Step 1: Rule-based pre-checks ────────────────────────────────────────
+    pre = run_admission_prechecks(
+        enrollee_id      = req.enrollee_id,
+        encounter_date   = req.encounter_date,
+        admission_code   = req.admission_code,
+        days             = req.days,
+        diagnosis_codes  = req.admitting_diagnosis_codes,
+        diagnosis_names  = req.admitting_diagnosis_names,
+        conn             = eng.conn,
     )
-    prompt = f"""You are a clinical reviewer for a Nigerian HMO cost-control unit.
-
-A provider is requesting inpatient admission for an enrollee.
-
-Room type: {req.admission_code} — {room_name}
-Expected duration: {req.days} day(s)
-Admitting diagnoses: {diag_list}
-
-Assess:
-1. Is inpatient admission clinically necessary for these diagnoses?
-2. Is the expected duration reasonable for this condition in Nigerian HMO practice?
-3. Is the room type appropriate? (Private for serious/critical cases; General for routine)
-
-Respond in JSON only (no markdown):
-{{
-  "appropriate": true or false,
-  "duration_reasonable": true or false,
-  "room_appropriate": true or false,
-  "confidence": 0-100,
-  "reasoning": "One or two concise sentences."
-}}"""
-
-    try:
-        ai = _call_claude(prompt)
-    except Exception:
-        ai = {"appropriate": False, "confidence": 0,
-              "reasoning": "AI call failed — agent to assess independently."}
 
     review_id = str(uuid.uuid4())[:16]
-    mongo_db.insert_klaire_review({
+    base_doc  = {
         "review_id":                 review_id,
         "review_type":               "PA_ADMISSION",
         "enrollee_id":               req.enrollee_id,
@@ -1943,27 +1943,91 @@ Respond in JSON only (no markdown):
         "days":                      req.days,
         "admitting_diagnosis_codes": req.admitting_diagnosis_codes,
         "admitting_diagnosis_names": req.admitting_diagnosis_names,
-        "ai_appropriate":            ai.get("appropriate", False),
-        "ai_duration_reasonable":    ai.get("duration_reasonable", True),
-        "ai_room_appropriate":       ai.get("room_appropriate", True),
-        "ai_confidence":             int(ai.get("confidence", 0)),
-        "ai_reasoning":              ai.get("reasoning", ""),
-        "status":                    "PENDING_REVIEW",
+        "pre_check_severity":        pre["severity"],
+        "pre_check_triggered_rules": pre["triggered_rules"],
+        "pre_check_summary":         pre["summary"],
+        "pre_check_readmission":     pre["readmission"],
         "reviewed_by":               None,
         "review_notes":              None,
         "reviewed_at":               None,
         "created_at":                datetime.now().isoformat(),
+    }
+
+    # ── Step 2: Auto-DENY (outpatient diagnoses only) ────────────────────────
+    if pre["decision"] == "DENY":
+        mongo_db.insert_klaire_review({
+            **base_doc,
+            "status":       "DENIED",
+            "auto_decided": True,
+            "ai_reasoning": pre["summary"],
+        })
+        return {
+            "review_id":    review_id,
+            "status":       "DENIED",
+            "auto_decided": True,
+            "pre_check":    pre,
+        }
+
+    # ── Step 3: PENDING_REVIEW — run AI for advisory context ─────────────────
+    diag_list = ", ".join(
+        f"{c} ({req.admitting_diagnosis_names.get(c, c)})"
+        for c in req.admitting_diagnosis_codes
+    )
+    flags_text = "\n".join(
+        f"- [{r['rule']}] {r['detail']}" for r in pre["triggered_rules"]
+    ) or "None"
+
+    prompt = f"""You are a clinical reviewer for a Nigerian HMO cost-control unit.
+
+A provider is requesting inpatient admission. Review the pre-check advisory and give
+a clinical recommendation for the agent.
+
+Room type: {req.admission_code} — {room_name}
+Requested duration: {req.days} day(s)
+Admitting diagnoses: {diag_list}
+Severity (pre-check): {pre['severity']}
+
+Pre-check advisory flags:
+{flags_text}
+
+Assess:
+1. Is inpatient admission clinically necessary for these diagnoses?
+2. Is the requested duration reasonable for this condition in Nigerian HMO practice?
+
+Respond in JSON only (no markdown):
+{{
+  "appropriate": true or false,
+  "duration_reasonable": true or false,
+  "confidence": 0-100,
+  "reasoning": "One or two concise sentences."
+}}"""
+
+    try:
+        ai = _call_claude(prompt)
+    except Exception:
+        ai = {"appropriate": False, "confidence": 0,
+              "reasoning": "AI call failed — agent to assess independently."}
+
+    mongo_db.insert_klaire_review({
+        **base_doc,
+        "status":                 "PENDING_REVIEW",
+        "auto_decided":           False,
+        "ai_appropriate":         ai.get("appropriate", False),
+        "ai_duration_reasonable": ai.get("duration_reasonable", True),
+        "ai_confidence":          int(ai.get("confidence", 0)),
+        "ai_reasoning":           ai.get("reasoning", ""),
     })
 
     return {
-        "review_id": review_id,
-        "status":    "PENDING_REVIEW",
+        "review_id":    review_id,
+        "status":       "PENDING_REVIEW",
+        "auto_decided": False,
+        "pre_check":    pre,
         "ai_advice": {
-            "appropriate":        ai.get("appropriate", False),
+            "appropriate":         ai.get("appropriate", False),
             "duration_reasonable": ai.get("duration_reasonable", True),
-            "room_appropriate":   ai.get("room_appropriate", True),
-            "confidence":         int(ai.get("confidence", 0)),
-            "reasoning":          ai.get("reasoning", ""),
+            "confidence":          int(ai.get("confidence", 0)),
+            "reasoning":           ai.get("reasoning", ""),
         },
     }
 

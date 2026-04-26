@@ -140,18 +140,24 @@ def _get_conn(db_path: str):
     return duckdb.connect(db_path, read_only=True)
 
 
-def _last_gp_visit(conn, enrollee_id: str, before_date: _date, days: int) -> Optional[_date]:
-    """Returns the most recent GP consult date within `days` before `before_date`, or None."""
+def _last_gp_visit(conn, enrollee_id: str, before_date: _date, days: int,
+                   include_same_day: bool = True) -> Optional[_date]:
+    """
+    Returns the most recent GP consult date within `days` of `before_date`, or None.
+    include_same_day=True (default) — includes consultations on before_date itself,
+    which supports same-day GP referral → specialist on the same encounter date.
+    """
     lookback = (before_date - timedelta(days=days)).strftime("%Y-%m-%d")
     enc_str  = before_date.strftime("%Y-%m-%d")
+    comparator = "<=" if include_same_day else "<"
     try:
-        row = conn.execute("""
+        row = conn.execute(f"""
             SELECT MAX(CAST(requestdate AS DATE))
             FROM "AI DRIVEN DATA"."PA DATA"
             WHERE IID = ?
               AND UPPER(TRIM(code)) IN ('CONS021', 'CONS022')
               AND CAST(requestdate AS DATE) >= ?
-              AND CAST(requestdate AS DATE) < ?
+              AND CAST(requestdate AS DATE) {comparator} ?
         """, [enrollee_id, lookback, enc_str]).fetchone()
         if row and row[0]:
             v = row[0]
@@ -163,14 +169,19 @@ def _last_gp_visit(conn, enrollee_id: str, before_date: _date, days: int) -> Opt
 
 def _last_specialist_visit(
     conn, enrollee_id: str, codes: List[str],
-    before_date: _date, days: int
+    before_date: _date, days: int,
+    include_same_day: bool = False,
 ) -> Optional[_date]:
-    """Returns most recent date of any of the given specialist codes within `days`."""
+    """
+    Returns most recent date of any of the given specialist codes within `days`.
+    include_same_day=False by default for duplicate detection (strict prior-visit check).
+    """
     if not codes:
         return None
     placeholders = ",".join("?" * len(codes))
-    lookback = (before_date - timedelta(days=days)).strftime("%Y-%m-%d")
-    enc_str  = before_date.strftime("%Y-%m-%d")
+    lookback   = (before_date - timedelta(days=days)).strftime("%Y-%m-%d")
+    enc_str    = before_date.strftime("%Y-%m-%d")
+    comparator = "<=" if include_same_day else "<"
     try:
         row = conn.execute(f"""
             SELECT MAX(CAST(requestdate AS DATE))
@@ -178,7 +189,7 @@ def _last_specialist_visit(
             WHERE IID = ?
               AND UPPER(TRIM(code)) IN ({placeholders})
               AND CAST(requestdate AS DATE) >= ?
-              AND CAST(requestdate AS DATE) < ?
+              AND CAST(requestdate AS DATE) {comparator} ?
         """, [enrollee_id] + [c.upper() for c in codes] + [lookback, enc_str]).fetchone()
         if row and row[0]:
             v = row[0]
@@ -211,7 +222,7 @@ def _last_gp_review(conn, enrollee_id: str, before_date: _date, days: int) -> Op
             WHERE IID = ?
               AND UPPER(TRIM(code)) = 'CONS022'
               AND CAST(requestdate AS DATE) >= ?
-              AND CAST(requestdate AS DATE) < ?
+              AND CAST(requestdate AS DATE) <= ?
         """, [enrollee_id, lookback, enc_str]).fetchone()
         if row and row[0]:
             v = row[0]
@@ -575,6 +586,7 @@ def evaluate_specialist_consultation(
     diagnosis_code: str,
     db_path: str,
     diagnosis_name: str = "",
+    same_day_gp_pa_ref: Optional[str] = None,
 ) -> Dict:
     """
     Returns full decision trace for a Specialist consultation request.
@@ -630,35 +642,64 @@ def evaluate_specialist_consultation(
         {"enrollee_capitated": enrollee_capitated, "specialist_procedure_capitated": spec_capitated},
     ))
 
+    qa_flag   = False
+    qa_reason = None
+
     conn = _get_conn(db_path)
     try:
-        # ── Step 2: GP referral within 7 days ─────────────────────────────────
-        last_gp = _last_gp_visit(conn, enrollee_id, enc_dt, days=7)
+        # ── Step 2: GP referral — same day OR within 7 days ───────────────────
+        # include_same_day=True so a GP consultation submitted earlier today counts
+        # as a valid same-day referral (e.g. hospital submits GP first, then specialist).
+        last_gp = _last_gp_visit(conn, enrollee_id, enc_dt, days=7, include_same_day=True)
 
         if not last_gp:
-            steps.append(_step(
-                2, "GP Referral Check (7 days)", "FAIL",
-                f"No GP consultation found for enrollee {enrollee_id} in the last 7 days. "
-                f"A specialist visit requires a GP referral. "
-                f"Provider message: 'Enrollee has no GP consult history in the last 7 days. "
-                f"Contact us to establish whether a GP referred this patient.'",
-                {"last_gp_date": None, "window_days": 7},
-            ))
-            return {
-                "consultation_type": "SPECIALIST",
-                "specialist_code": specialist_code, "specialist_name": code_info["name"],
-                "decision": "DENY", "approved_code": None,
-                "change_to_code": None, "change_reason": None,
-                "qa_flag": False, "qa_reason": None,
-                "requires_agent_review": False, "review_id": None,
-                "steps": steps,
-            }
+            # Fallback: hospital submitted GP and specialist together in the same
+            # session — GP not yet in PA DATA but provider passed the PA reference.
+            if same_day_gp_pa_ref:
+                steps.append(_step(
+                    2, "GP Referral Check (same day / 7 days)", "PASS",
+                    f"No GP found in PA DATA yet, but same-day GP PA reference provided: "
+                    f"'{same_day_gp_pa_ref}'. Accepted as same-day referral — "
+                    f"agent must verify this reference before final approval.",
+                    {"last_gp_date": str(enc_dt), "days_since": 0,
+                     "same_day_referral": True,
+                     "gp_pa_ref": same_day_gp_pa_ref,
+                     "requires_verification": True},
+                ))
+                # Mark qa_flag so an agent verifies the GP PA ref
+                qa_flag   = True
+                qa_reason = (
+                    f"Same-day GP PA reference '{same_day_gp_pa_ref}' provided but "
+                    f"GP not yet confirmed in PA DATA. Agent must verify before approving."
+                )
+            else:
+                steps.append(_step(
+                    2, "GP Referral Check (same day / 7 days)", "FAIL",
+                    f"No GP consultation found for enrollee {enrollee_id} on {enc_dt} "
+                    f"or in the last 7 days. "
+                    f"A specialist visit requires a GP referral (same-day referrals are accepted). "
+                    f"Provider message: 'Please submit the GP consultation first, then re-submit "
+                    f"the specialist request. If submitted together, pass the GP PA reference in "
+                    f"the same_day_gp_pa_ref field.'",
+                    {"last_gp_date": None, "window_days": 7, "same_day_checked": True},
+                ))
+                return {
+                    "consultation_type": "SPECIALIST",
+                    "specialist_code": specialist_code, "specialist_name": code_info["name"],
+                    "decision": "DENY", "approved_code": None,
+                    "change_to_code": None, "change_reason": None,
+                    "qa_flag": False, "qa_reason": None,
+                    "requires_agent_review": False, "review_id": None,
+                    "steps": steps,
+                }
 
         days_since_gp = (enc_dt - last_gp).days
+        referral_label = "same-day referral" if days_since_gp == 0 else f"{days_since_gp} day(s) ago"
         steps.append(_step(
-            2, "GP Referral Check (7 days)", "PASS",
-            f"GP consultation found {days_since_gp} day(s) ago ({last_gp}). Referral established.",
-            {"last_gp_date": str(last_gp), "days_since": days_since_gp},
+            2, "GP Referral Check (same day / 7 days)", "PASS",
+            f"GP consultation found — {referral_label} ({last_gp}). Referral established.",
+            {"last_gp_date": str(last_gp), "days_since": days_since_gp,
+             "same_day_referral": days_since_gp == 0},
         ))
 
         # ── Step 3: Same specialist in last 14 days ────────────────────────────
@@ -698,8 +739,6 @@ def evaluate_specialist_consultation(
         # ── Step 4: Any specialist in last 30 days ─────────────────────────────
         all_spec_codes = get_specialist_codes()
         last_any  = _last_specialist_visit(conn, enrollee_id, all_spec_codes, enc_dt, days=30)
-        qa_flag   = False
-        qa_reason = None
 
         if last_any:
             days_since_any = (enc_dt - last_any).days

@@ -806,7 +806,7 @@ Respond in JSON format:
                     FROM "AI DRIVEN DATA"."PA DATA"
                     WHERE IID = ?
                       AND CAST(requestdate AS DATE) >= ?
-                      AND CAST(requestdate AS DATE) < ?
+                      AND CAST(requestdate AS DATE) <= ?
                       AND panumber != ?
                 """, [enrollee_id, lookback, enc_str, str(pa_number)]).fetchone()
             else:
@@ -815,7 +815,7 @@ Respond in JSON format:
                     FROM "AI DRIVEN DATA"."PA DATA"
                     WHERE IID = ?
                       AND CAST(requestdate AS DATE) >= ?
-                      AND CAST(requestdate AS DATE) < ?
+                      AND CAST(requestdate AS DATE) <= ?
                 """, [enrollee_id, lookback, enc_str]).fetchone()
             if row and row[0]:
                 last = row[0]
@@ -842,7 +842,7 @@ Respond in JSON format:
                 FROM "AI DRIVEN DATA"."CLAIMS DATA"
                 WHERE enrollee_id = ?
                   AND CAST(encounterdatefrom AS DATE) >= ?
-                  AND CAST(encounterdatefrom AS DATE) < ?
+                  AND CAST(encounterdatefrom AS DATE) <= ?
             """, [enrollee_id, lookback, enc_str]).fetchone()
             if row and row[0]:
                 last = row[0]
@@ -976,7 +976,7 @@ Respond in JSON format:
                     WHERE IID = ?
                       AND UPPER(TRIM(code)) IN ('CONS021', 'CONS022')
                       AND CAST(requestdate AS DATE) >= ?
-                      AND CAST(requestdate AS DATE) < ?
+                      AND CAST(requestdate AS DATE) <= ?
                       AND providerid = ?
                 """, [enrollee_id, lookback, enc_str, provider_id]).fetchone()
                 if row and row[0] and int(row[0]) > 0:
@@ -1050,7 +1050,7 @@ Respond in JSON format:
                     WHERE IID = ?
                       AND UPPER(TRIM(code)) IN ('CONS021', 'CONS022')
                       AND CAST(requestdate AS DATE) >= ?
-                      AND CAST(requestdate AS DATE) < ?
+                      AND CAST(requestdate AS DATE) <= ?
                       AND providerid = ?
                 """, [enrollee_id, lookback, enc_str, provider_id]).fetchone()
                 if row and row[0] and int(row[0]) > 0:
@@ -1104,7 +1104,7 @@ Respond in JSON format:
                     WHERE IID = ?
                       AND UPPER(TRIM(diagnosiscode)) = UPPER(TRIM(?))
                       AND CAST(requestdate AS DATE) >= ?
-                      AND CAST(requestdate AS DATE) < ?
+                      AND CAST(requestdate AS DATE) <= ?
                       AND providerid != ?
                 """, [enrollee_id, dcode, lookback, enc_str, provider_id]).fetchone()
                 if row and row[0] and int(row[0]) > 0:
@@ -1163,7 +1163,7 @@ Respond in JSON format:
                 WHERE IID = ?
                   AND UPPER(LEFT(TRIM(code), 3)) = 'ADM'
                   AND CAST(requestdate AS DATE) >= ?
-                  AND CAST(requestdate AS DATE) < ?
+                  AND CAST(requestdate AS DATE) <= ?
             """, [enrollee_id, lookback, enc_str]).fetchone()
 
             if not (row and row[0]):
@@ -1750,7 +1750,7 @@ Return ONLY valid JSON (no markdown):
                         FROM "AI DRIVEN DATA"."PA DATA" p
                         WHERE p.IID = ?
                           AND CAST(p.requestdate AS DATE) >= ?
-                          AND CAST(p.requestdate AS DATE) < ?
+                          AND CAST(p.requestdate AS DATE) <= ?
                           AND UPPER(LEFT(TRIM(p.code), 3)) = 'DRG'
                     """, [enrollee_id, lookback3, encounter_date]).fetchdf()
                     for _, row in prior_abx.iterrows():

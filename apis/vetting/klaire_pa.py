@@ -22,9 +22,10 @@ Rules applied (capitation and 14-day visit already handled at consultation stage
  10. Disease Combination Check (AI — request-level, no learning)
  11. Diagnosis-Encounter Mismatch (AI — upcoding detection, outpatient only)
  12. Injection Without Admission (pre-auth, non-admitted only)
- 13. Drug-Drug Interaction check (OpenFDA + AI — DRG codes only)
- 14. Quantity vs Diagnosis Appropriateness (rules-based + AI fallback)
+ 13. Drug-Drug Interaction check (RxClass pre-filter → OpenFDA + AI — DRG codes only)
+ 14. Quantity vs Diagnosis Appropriateness (RxNorm class + rules-based + AI fallback)
  15. Post-Discharge Overlap (DB — labs billed within 14 days of discharge)
+ 16. OpenFDA Indication vs Diagnosis (drug label indications_and_usage — DRG only)
 
 Trust model:
   - Master table / trusted learning table → auto-decide (no agent needed)
@@ -41,6 +42,13 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from . import mongo_db
+from .drug_apis import (
+    rxnorm_lookup,
+    rxclass_get_drug_classes,
+    is_high_risk_class,
+    who_eml_lookup,
+    openfda_get_indications,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -494,6 +502,18 @@ def _validate_one_procedure(
             conn=engine.conn,
         )
 
+    # ── Rule 16 — OpenFDA indication vs diagnosis ─────────────────────────────
+    # Checks if FDA label indications_and_usage matches the submitted diagnosis.
+    # Only for DRG codes; uses Haiku (cheap). Flags off-label use for review.
+    indication_check: Dict = {"triggered": False}
+    if proc_code.upper().startswith("DRG") and anchor_diag:
+        indication_check = check_openfda_indication(
+            proc_code=proc_code,
+            proc_name=proc_name,
+            diagnosis_code=anchor_diag,
+            diagnosis_name=anchor_diag_name,
+        )
+
     # ── Price override check ──────────────────────────────────────────────────
     price_override = (
         provider_price is not None
@@ -595,6 +615,16 @@ def _validate_one_procedure(
         if decision != "DENY":
             decision = "PENDING_REVIEW"
 
+    # Rule 16 — OpenFDA indication off-label advisory
+    if indication_check.get("triggered"):
+        requires_review = True
+        review_reasons.append(
+            f"Off-Label Use: {proc_name} — {indication_check.get('reasoning', 'may not be indicated for this diagnosis')} "
+            f"(FDA label check, confidence {indication_check.get('confidence', 0)}%)"
+        )
+        if decision != "DENY":
+            decision = "PENDING_REVIEW"
+
     # Pre-Auth: force all non-DENY to PENDING_REVIEW — AI advises only, agent decides
     if encounter_type == "INPATIENT" and decision != "DENY":
         decision = "PENDING_REVIEW"
@@ -652,6 +682,7 @@ def _validate_one_procedure(
             "injection_check":     injection_check,
             "ddi_check":           ddi_check,
             "qty_appropriateness": qty_appropriateness,
+            "indication_check":    indication_check,
             "review_reasons":      review_reasons,
             "status":              "PENDING_REVIEW",
             "reviewed_by":         None,
@@ -682,6 +713,7 @@ def _validate_one_procedure(
         "injection_check":     injection_check,
         "ddi_check":           ddi_check,
         "qty_appropriateness": qty_appropriateness,
+        "indication_check":    indication_check,
         "requires_agent_review": requires_review,
         "review_reasons":      review_reasons,
         "review_id":           review_id,
@@ -740,8 +772,11 @@ def check_drug_drug_interactions(
 
     Only runs for drug procedures (DRG prefix).
     1. Fetches 30-day prior medications from PA DATA.
-    2. Queries OpenFDA for the current drug's known interaction warnings.
-    3. If interaction text found, asks Claude whether any prior med is dangerous.
+    2. RxClass pre-filter: only proceed if current drug OR any prior med is in a
+       high-risk interaction class (anticoagulants, NSAIDs, antifungals, etc.).
+       This avoids calling OpenFDA for safe low-risk combinations.
+    3. Queries OpenFDA for the current drug's known interaction warnings.
+    4. If interaction text found, asks Claude whether any prior med is dangerous.
 
     Never auto-denies. Flags PENDING_REVIEW + advisory if a dangerous combination found.
     """
@@ -763,7 +798,7 @@ def check_drug_drug_interactions(
             WHERE p.IID = ?
               AND UPPER(LEFT(TRIM(p.code), 3)) = 'DRG'
               AND CAST(p.requestdate AS DATE) >= ?
-              AND CAST(p.requestdate AS DATE) < ?
+              AND CAST(p.requestdate AS DATE) <= ?
         """, [enrollee_id, lookback, encounter_date]).fetchall()
         prior_meds = [{"code": r[0], "name": r[1], "date": str(r[2])} for r in rows]
     except Exception as e:
@@ -771,6 +806,15 @@ def check_drug_drug_interactions(
 
     if not prior_meds:
         return {"triggered": False}
+
+    # RxClass pre-filter: skip OpenFDA + AI unless at least one drug is high-risk
+    current_high_risk = is_high_risk_class(proc_name)
+    prior_high_risk   = any(is_high_risk_class(m["name"]) for m in prior_meds)
+    if not current_high_risk and not prior_high_risk:
+        return {
+            "triggered": False,
+            "note":      "RxClass pre-filter: no high-risk drug classes detected — DDI check skipped",
+        }
 
     # Get interaction text from OpenFDA
     interaction_text = _openfda_get_interactions(proc_name)
@@ -866,7 +910,14 @@ def check_quantity_appropriateness(
 
     name_upper = proc_name.upper()
 
-    # Fast rules-based pass
+    # RxNorm class enrichment: use authoritative class for drugs not matched by keyword
+    rx_class: Optional[str] = None
+    if proc_code.upper().startswith("DRG"):
+        rx = rxnorm_lookup(proc_name)
+        if rx:
+            rx_class = (rx.get("therapeutic_class") or "").lower()
+
+    # Fast rules-based pass (keyword matching)
     for keywords, max_days, label in _QTY_RULES:
         if any(kw in name_upper for kw in keywords):
             if encounter_type == "OUTPATIENT" and quantity > max_days:
@@ -879,7 +930,34 @@ def check_quantity_appropriateness(
                 }
             return {"flagged": False, "source": "rules"}  # known drug, quantity within range
 
-    # AI check for drug procedures not covered by fast rules
+    # RxNorm class-based check for drugs not matched by keyword
+    if rx_class and encounter_type == "OUTPATIENT":
+        if any(kw in rx_class for kw in ("antibiotic", "antibacterial", "antimicrobial")) and quantity > 14:
+            return {
+                "flagged":              True,
+                "recommended_quantity": 14,
+                "reasoning":            f"Antibiotic course ({rx_class}) — {quantity} units likely exceeds standard treatment duration.",
+                "source":               "rxnorm",
+                "requires_review":      True,
+            }
+        if any(kw in rx_class for kw in ("antimalarial", "antiparasitic", "artemisinin")) and quantity > 3:
+            return {
+                "flagged":              True,
+                "recommended_quantity": 3,
+                "reasoning":            f"Antimalarial ({rx_class}) — standard ACT course is 3 days; {quantity} units submitted.",
+                "source":               "rxnorm",
+                "requires_review":      True,
+            }
+        if any(kw in rx_class for kw in ("corticosteroid", "glucocorticoid")) and quantity > 14:
+            return {
+                "flagged":              True,
+                "recommended_quantity": 14,
+                "reasoning":            f"Corticosteroid ({rx_class}) — outpatient courses >14 days require specialist oversight.",
+                "source":               "rxnorm",
+                "requires_review":      True,
+            }
+
+    # AI check for drug procedures not covered by fast rules or RxNorm class
     if not proc_code.upper().startswith("DRG") or quantity < 10:
         return {"flagged": False}
 
@@ -969,7 +1047,7 @@ def check_post_discharge_overlap(
             WHERE IID = ?
               AND UPPER(LEFT(TRIM(code), 3)) = 'ADM'
               AND CAST(requestdate AS DATE) >= ?
-              AND CAST(requestdate AS DATE) < ?
+              AND CAST(requestdate AS DATE) <= ?
         """, [enrollee_id, lookback, enc_str]).fetchone()
 
         if not (row and row[0]):
@@ -997,6 +1075,88 @@ def check_post_discharge_overlap(
         logger.warning(f"check_post_discharge_overlap error: {e}")
 
     return {"triggered": False}
+
+
+# ── OpenFDA Indication vs Diagnosis Check ────────────────────────────────────
+
+def check_openfda_indication(
+    proc_code: str,
+    proc_name: str,
+    diagnosis_code: str,
+    diagnosis_name: str,
+) -> Dict:
+    """
+    Rule 16 — OpenFDA drug label indication vs submitted diagnosis.
+
+    Only runs for DRG codes.  Fetches the FDA label's indications_and_usage section
+    and asks Claude (Haiku — cheap) whether this drug is indicated for the diagnosis.
+
+    Never auto-denies. Flags PENDING_REVIEW if the diagnosis appears outside the
+    drug's approved indications.
+
+    Off-label use is flagged as a soft concern, not a hard deny.
+    """
+    if not proc_code.upper().startswith("DRG"):
+        return {"triggered": False}
+
+    indications = openfda_get_indications(proc_name)
+    if not indications:
+        return {"triggered": False, "note": "No FDA label data available"}
+
+    prompt = f"""You are a clinical pharmacist reviewing a Nigerian HMO PA request.
+
+Drug requested: {proc_code} — {proc_name}
+Submitted diagnosis: {diagnosis_code} — {diagnosis_name}
+
+FDA label indications_and_usage section (excerpt):
+{indications[:1200]}
+
+Question: Is {proc_name} indicated (standard approved use) for the diagnosis "{diagnosis_name}"?
+Consider both the primary indication AND commonly accepted uses (e.g. amoxicillin covers many infections).
+Flag as off-label ONLY if the drug clearly has no clinical basis for this diagnosis.
+
+Respond in JSON only (no markdown):
+{{
+  "indicated": true or false,
+  "confidence": 0-100,
+  "reasoning": "one sentence",
+  "off_label": true or false
+}}"""
+
+    import anthropic as _anthropic
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return {"triggered": False}
+
+    try:
+        client = _anthropic.Anthropic(api_key=api_key)
+        resp   = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=300, temperature=0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw  = resp.content[0].text.strip()
+        if "```" in raw:
+            raw = raw[raw.find("{"):raw.rfind("}") + 1]
+        data = json.loads(raw)
+
+        indicated  = bool(data.get("indicated", True))
+        off_label  = bool(data.get("off_label", False))
+        confidence = int(data.get("confidence", 80))
+        reasoning  = data.get("reasoning", "")
+
+        return {
+            "triggered":       off_label and not indicated,
+            "indicated":       indicated,
+            "off_label":       off_label,
+            "confidence":      confidence,
+            "reasoning":       reasoning,
+            "requires_review": off_label and not indicated,
+            "source":          "openfda+ai",
+        }
+    except Exception as e:
+        logger.debug(f"OpenFDA indication check failed for {proc_code}: {e}")
+        return {"triggered": False}
 
 
 # ── Diagnosis-Encounter Mismatch Check ───────────────────────────────────────
@@ -1296,6 +1456,10 @@ def validate_pa_request(
                 results_map[idx] = {"procedure_code": items[idx].get("procedure_code", ""),
                                     "decision": "PENDING_REVIEW", "error": str(e)}
     results = [results_map[i] for i in range(len(items))]
+
+    # Single engine for all request-level checks (post-parallel, same thread)
+    from .comprehensive import ComprehensiveVettingEngine
+    engine = ComprehensiveVettingEngine(db_path)
 
     # ── Disease Combination Check (request-level) ─────────────────────────────
     # Collect all unique diagnoses across the whole request

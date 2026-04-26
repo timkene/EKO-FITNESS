@@ -200,7 +200,7 @@ class ThirtyDayValidationEngine:
         FROM "AI DRIVEN DATA"."PA DATA"
         WHERE IID = '{enrollee_id}'
           AND requestdate >= '{date_30_days_ago}'
-          AND requestdate < '{encounter_date}'
+          AND requestdate <= '{encounter_date}'
           AND code IS NOT NULL
           AND TRIM(code) != ''
         """
@@ -214,7 +214,7 @@ class ThirtyDayValidationEngine:
         FROM "AI DRIVEN DATA"."CLAIMS DATA"
         WHERE enrollee_id = '{enrollee_id}'
           AND encounterdatefrom >= '{date_30_days_ago}'
-          AND encounterdatefrom < '{encounter_date}'
+          AND encounterdatefrom <= '{encounter_date}'
           AND code IS NOT NULL
           AND TRIM(code) != ''
         """

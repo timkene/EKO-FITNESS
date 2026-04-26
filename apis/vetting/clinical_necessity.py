@@ -27,6 +27,9 @@ from typing import Optional, List, Dict, Any
 
 import anthropic
 
+from .drug_apis import rxclass_get_drug_classes, who_eml_lookup
+from .bnf_client import bnf_get_guidance
+
 logger = logging.getLogger(__name__)
 
 # ── Drug route keywords ────────────────────────────────────────────────────────
@@ -273,7 +276,7 @@ class ClinicalNecessityEngine:
                     ON LOWER(TRIM(pd.procedurecode)) = LOWER(TRIM(p.code))
                 WHERE p.IID = ?
                   AND CAST(p.requestdate AS DATE) >= ?
-                  AND CAST(p.requestdate AS DATE) < ?
+                  AND CAST(p.requestdate AS DATE) <= ?
                   AND UPPER(LEFT(TRIM(p.code), 3)) = 'DRG'
             """, [enrollee_id, lookback, encounter_date]).fetchdf()
 
@@ -295,7 +298,7 @@ class ClinicalNecessityEngine:
                     FROM "AI DRIVEN DATA"."CLAIMS DATA"
                     WHERE enrollee_id = ?
                       AND CAST(encounterdatefrom AS DATE) >= ?
-                      AND CAST(encounterdatefrom AS DATE) < ?
+                      AND CAST(encounterdatefrom AS DATE) <= ?
                       AND UPPER(LEFT(TRIM(code), 3)) = 'DRG'
                 """, [enrollee_id, lookback, encounter_date]).fetchdf()
 
@@ -391,6 +394,45 @@ class ClinicalNecessityEngine:
                 "assess whether the remaining components are still appropriate).\n"
             )
 
+        # WHO EML + RxClass enrichment for AI prompt
+        _who = who_eml_lookup(procedure_name)
+        _who_ctx = (
+            f"✅ WHO Essential Medicine (ATC: {_who.get('atc_code', 'N/A')})"
+            if _who.get("essential")
+            else "⚠️ Not on WHO Essential Medicines List (may be non-essential or brand-specific)"
+        )
+
+        _rx_classes = rxclass_get_drug_classes(procedure_name)
+        _rx_class_ctx = (
+            ", ".join(_rx_classes[:3]) if _rx_classes
+            else procedure_class or "Unknown"
+        )
+
+        # RxClass step-therapy confirmation: check if any prior med is in same RxClass
+        _same_class_priors: List[str] = []
+        if _rx_classes and recent_meds:
+            _rx_lower = {c.lower() for c in _rx_classes}
+            for m in recent_meds[-20:]:
+                m_classes = rxclass_get_drug_classes(m.get("name", ""))
+                if any(mc.lower() in _rx_lower for mc in m_classes):
+                    _same_class_priors.append(f"{m['name']} [{m['date']}]")
+
+        _step_therapy_ctx = (
+            "Prior same-class medications confirmed (RxClass): " + ", ".join(_same_class_priors[:3])
+            if _same_class_priors
+            else "No prior same-class medications found in RxClass"
+        )
+
+        # BNF clinical guidance (supplementary — silently absent if not found)
+        _bnf_text = bnf_get_guidance(procedure_name, diagnosis_name)
+        _bnf_ctx  = (
+            f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"BNF 80 CLINICAL GUIDANCE (supplementary)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{_bnf_text}"
+            if _bnf_text else ""
+        )
+
         prompt = f"""You are a senior clinical pharmacist reviewing a pre-authorization request for a Nigerian HMO.
 Determine if this treatment request is clinically necessary and appropriate.
 {regimen_ctx}
@@ -398,7 +440,8 @@ Determine if this treatment request is clinically necessary and appropriate.
 TREATMENT REQUESTED (current item)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Drug/Procedure  : {procedure_name} (code: {procedure_code})
-Drug Class      : {procedure_class or "Unknown"}
+Drug Class (RxClass): {_rx_class_ctx}
+WHO EML Status  : {_who_ctx}
 Route/Formulation: {route}
 Diagnosis       : {diagnosis_name} (ICD-10: {diagnosis_code})
 
@@ -413,6 +456,9 @@ Tests/procedures done (last 3 days):
 Prior medications (last 30 days):
 {meds_ctx}
 
+Step-therapy (RxClass same-class check):
+{_step_therapy_ctx}
+{_bnf_ctx}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CLINICAL NECESSITY EVALUATION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -447,6 +493,9 @@ Answer ALL of the following:
 4. STEP-DOWN CHECK:
    - If route is ORAL and condition is severe, check prior medications for injectable
      of the same or similar class. If found → step-down is appropriate → approve route.
+   - The "Step-therapy (RxClass)" field above gives authoritative confirmation of whether
+     a same-class drug was used recently. If it lists prior medications → step-down confirmed.
+   - WHO EML status above indicates if this is an essential first-line medicine.
 
 5. OVERALL DECISION:
    - APPROVE (true): Clinically necessary and appropriate

@@ -1,11 +1,30 @@
-# Eko Football / DLT API (Render)
+# ── Web framework ─────────────────────────────────────────────────────────────
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
-python-dotenv>=1.0.0
 pydantic[email]>=2.0.0
+python-multipart>=0.0.6
+python-dotenv>=1.0.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+duckdb==1.4.4
+pymongo>=4.6.0
+
+# ── Data / Excel ──────────────────────────────────────────────────────────────
+pandas>=2.0.0
+openpyxl>=3.1.0          # reads capitation .xlsx files
+
+# ── AI / LLM ──────────────────────────────────────────────────────────────────
+anthropic>=0.40.0         # Claude API (Rules 7, 9-14, 16 + consultation AI)
+
+# ── BNF vector DB (local) ─────────────────────────────────────────────────────
+chromadb>=0.5.0           # BNF 80 Chroma persistent DB
+sentence-transformers>=2.7.0  # all-MiniLM-L6-v2 embeddings for BNF queries
+
+# ── HTTP / Auth ───────────────────────────────────────────────────────────────
+httpx>=0.27.0
 email-validator>=2.0.0
 passlib[bcrypt]>=1.7.4
-python-multipart>=0.0.6
-duckdb==1.4.4
-httpx>=0.27.0
-pymongo>=4.6.0
+
+# ── TOML (secrets.toml fallback for MotherDuck token) ─────────────────────────
+# tomllib is built-in for Python >= 3.11; tomli is the backport for 3.10 and below
+tomli>=2.0.0; python_version < "3.11"
