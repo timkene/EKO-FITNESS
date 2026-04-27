@@ -1678,14 +1678,15 @@ def klaire_submit_review(review_id: str, action: KlaireReviewAction):
                     )
 
         else:  # OVERRIDE — agent disagrees with AI
-            is_valid_override = True  # Agent overriding to approve means compatible
+            is_valid_override = (status == "HUMAN_APPROVED")
+            outcome_label     = "approved" if is_valid_override else "denied"
             for dc in all_diag_codes:
                 dn = diag_names.get(dc, dc)
                 mongo_db.upsert_procedure_diagnosis_learning(
                     proc_code, proc_name, dc, dn,
                     is_valid=is_valid_override,
                     confidence=90,
-                    reasoning=f"Agent override: approved. {agent_note}".strip(),
+                    reasoning=f"Agent override: {outcome_label}. {agent_note}".strip(),
                     approved_by=action.reviewed_by or "agent",
                 )
 
@@ -2054,6 +2055,11 @@ class KlairePARequest(BaseModel):
     admission_status:      Literal["ADMITTED", "NOT_ADMITTED"] = "NOT_ADMITTED"
     admission_approved_id: Optional[str] = None
     items:                 List[KlairePAItem] = Field(..., min_length=1)
+    session_basket:        List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Procedures approved earlier this session — not yet in live DB. "
+                    "Injected into DDI and clinical necessity checks as same-day history.",
+    )
 
 
 @app.post("/api/v1/klaire/pa")
@@ -2069,6 +2075,7 @@ def klaire_pa(req: KlairePARequest):
             encounter_type=req.encounter_type,
             db_path=get_db_path(),
             admission_status=req.admission_status,
+            session_basket=req.session_basket or [],
         )
         return result
     except Exception as e:

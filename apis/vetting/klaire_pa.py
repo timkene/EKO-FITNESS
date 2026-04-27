@@ -282,6 +282,7 @@ def _validate_one_procedure(
     quantity: int = 1,
     proc_name_hint: str = "",
     admission_status: str = "NOT_ADMITTED",
+    session_basket: Optional[List[Dict]] = None,
 ) -> Dict:
     """
     Run comprehensive validation for every (procedure, diagnosis) pair,
@@ -413,6 +414,7 @@ def _validate_one_procedure(
                 diagnosis_name=anchor_diag_name,
                 enrollee_id=enrollee_id,
                 encounter_date=encounter_date,
+                session_basket=session_basket,
             )
             first_line = {
                 "decision":         "APPROVE" if _cn_res.passed else "DENY",
@@ -500,6 +502,7 @@ def _validate_one_procedure(
             enrollee_id=enrollee_id,
             encounter_date=encounter_date,
             conn=engine.conn,
+            session_basket=session_basket,
         )
 
     # ── Rule 16 — OpenFDA indication vs diagnosis ─────────────────────────────
@@ -766,6 +769,7 @@ def check_drug_drug_interactions(
     enrollee_id: str,
     encounter_date: str,
     conn,
+    session_basket: Optional[List[Dict]] = None,
 ) -> Dict:
     """
     Rule 13 — Drug-Drug Interaction check.
@@ -803,6 +807,19 @@ def check_drug_drug_interactions(
         prior_meds = [{"code": r[0], "name": r[1], "date": str(r[2])} for r in rows]
     except Exception as e:
         logger.warning(f"DDI: prior meds fetch failed: {e}")
+
+    # Merge session basket DRG items — approved this session but not yet in live DB
+    if session_basket:
+        existing_codes = {m["code"].upper() for m in prior_meds}
+        for bitem in session_basket:
+            bcode = bitem.get("procedure_code", "").upper()
+            if bcode.startswith("DRG") and bcode not in existing_codes:
+                prior_meds.append({
+                    "code": bcode,
+                    "name": bitem.get("procedure_name", bcode),
+                    "date": encounter_date,
+                })
+                existing_codes.add(bcode)
 
     if not prior_meds:
         return {"triggered": False}
@@ -1405,6 +1422,7 @@ def validate_pa_request(
     encounter_type: str,
     db_path: str,
     admission_status: str = "NOT_ADMITTED",
+    session_basket: Optional[List[Dict]] = None,
 ) -> Dict:
     """
     Validate a full PA request (multiple procedures, each with 1+ diagnoses).
@@ -1441,6 +1459,7 @@ def validate_pa_request(
             comment=item.get("comment"),
             quantity=int(item.get("quantity") or 1),
             admission_status=admission_status,
+            session_basket=session_basket,
         )
 
     # Run all procedures in parallel — each thread has its own DuckDB connection

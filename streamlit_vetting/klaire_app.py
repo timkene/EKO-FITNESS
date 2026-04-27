@@ -322,7 +322,7 @@ def render_result(result: dict):
         st.json(result)
 
 
-def _submit_review(review_id: str, action: str, reviewed_by: str, notes: str):
+def _submit_review(review_id: str, action: str, reviewed_by: str, notes: str, basket_item: dict | None = None):
     try:
         resp = requests.post(
             f"{API}/api/v1/klaire/review/{review_id}",
@@ -333,8 +333,21 @@ def _submit_review(review_id: str, action: str, reviewed_by: str, notes: str):
         data = resp.json()
         if action in ("APPROVE", "AGREE"):
             st.success(f"✅ {data.get('message', 'Agreed with AI — learning recorded.')}")
+            # Add to basket so later requests see this as today's history
+            if basket_item and basket_item.get("enrollee_id") and basket_item.get("procedure_code"):
+                _add_to_basket(basket_item["enrollee_id"], [{
+                    "procedure_code": basket_item.get("procedure_code", ""),
+                    "procedure_name": basket_item.get("procedure_name", ""),
+                    "diagnosis_codes": basket_item.get("approved_diagnoses", []),
+                    "diagnosis_names": basket_item.get("diag_names", {}),
+                    "quantity": basket_item.get("quantity", 1),
+                    "branch": basket_item.get("branch", ""),
+                }])
         else:
             st.warning(f"⚠️ {data.get('message', 'AI overridden — decision recorded.')}")
+            # Remove from basket if it was previously added (agent is now denying it)
+            if basket_item and basket_item.get("enrollee_id") and basket_item.get("procedure_code"):
+                _remove_from_basket(basket_item["enrollee_id"], basket_item["procedure_code"])
 
         # Mirror the decision back into pa_result so PA Request tab shows updated status
         if "pa_result" in st.session_state:
@@ -344,9 +357,22 @@ def _submit_review(review_id: str, action: str, reviewed_by: str, notes: str):
             for item in items:
                 if item.get("review_id") == review_id:
                     item["decision"] = new_d
+                    # Sync basket with agent decision
+                    enr_id = pa.get("enrollee_id", "")
+                    if enr_id:
+                        if action in ("APPROVE", "AGREE"):
+                            _add_to_basket(enr_id, [{
+                                "procedure_code": item.get("procedure_code", ""),
+                                "procedure_name": item.get("procedure_name", ""),
+                                "diagnosis_codes": item.get("approved_diagnoses", []),
+                                "diagnosis_names": item.get("diag_names", {}),
+                                "quantity": item.get("quantity", 1),
+                                "branch": item.get("branch", ""),
+                            }])
+                        else:
+                            _remove_from_basket(enr_id, item.get("procedure_code", ""))
             # Recalculate overall
             decisions = [i.get("decision", "") for i in items]
-            terminal  = {"APPROVE", "APPROVED_BY_AGENT", "DENY", "DENIED_BY_AGENT"}
             approved_set = {"APPROVE", "APPROVED_BY_AGENT"}
             denied_set   = {"DENY", "DENIED_BY_AGENT"}
             if all(d in approved_set for d in decisions):
@@ -565,6 +591,36 @@ with hc2:
 st.divider()
 
 
+# ── Session basket helpers ────────────────────────────────────────────────────
+def _basket_key(enr_id: str) -> str:
+    return f"basket_{enr_id.strip()}"
+
+def _get_basket(enr_id: str) -> list:
+    return st.session_state.get(_basket_key(enr_id), [])
+
+def _add_to_basket(enr_id: str, items: list):
+    """Add approved procedure items to the enrollee's session basket."""
+    key = _basket_key(enr_id)
+    if key not in st.session_state:
+        st.session_state[key] = []
+    existing = {i["procedure_code"] for i in st.session_state[key]}
+    for item in items:
+        if item.get("procedure_code") and item["procedure_code"] not in existing:
+            st.session_state[key].append(item)
+            existing.add(item["procedure_code"])
+
+def _remove_from_basket(enr_id: str, procedure_code: str):
+    """Remove a specific procedure from the basket (e.g. when agent denies it)."""
+    key = _basket_key(enr_id)
+    if key in st.session_state:
+        st.session_state[key] = [
+            i for i in st.session_state[key]
+            if i.get("procedure_code", "").upper() != procedure_code.upper()
+        ]
+
+def _clear_basket(enr_id: str):
+    st.session_state[_basket_key(enr_id)] = []
+
 # ── Sidebar — enrollee + provider ─────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 👤 Enrollee & Provider")
@@ -583,6 +639,35 @@ with st.sidebar:
     hospital_name = _prov_sel.split(" (")[0].strip()      if _prov_sel else ""
 
     encounter_date = st.date_input("Encounter Date", value=date.today(), key="s_date")
+    st.divider()
+
+    # ── Session Basket ────────────────────────────────────────────────────────
+    _basket = _get_basket(enrollee_id) if (enrollee_id or "").strip() else []
+    if _basket:
+        st.markdown("#### 🧺 Session Basket")
+        st.caption(
+            "Procedures approved this session — injected into clinical checks "
+            "when submitting the next PA request."
+        )
+        for _bi in _basket:
+            _bc  = _bi.get("procedure_code", "")
+            _bn  = _bi.get("procedure_name", _bc)
+            _bdc = ", ".join(_bi.get("diagnosis_codes", []))
+            st.markdown(
+                f'<div style="background:#052e16;border-left:3px solid #22c55e;'
+                f'border-radius:6px;padding:6px 10px;margin-bottom:4px;">'
+                f'<span style="color:#4ade80;font-size:0.8em;font-weight:700;">{_bc}</span> '
+                f'<span style="color:#86efac;font-size:0.78em;">{_bn}</span><br>'
+                f'<span style="color:#6ee7b7;font-size:0.72em;">{_bdc}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        if st.button("🗑️ Clear Basket", key="clear_basket", use_container_width=True):
+            _clear_basket(enrollee_id)
+            st.rerun()
+    elif (enrollee_id or "").strip():
+        st.caption("🧺 Basket empty — approved procedures will appear here.")
+
     st.divider()
     st.caption("Complete all fields before submitting.")
 
@@ -1266,12 +1351,28 @@ elif "PA Request" in mode:
                 "admission_status":    st.session_state.get("pa_admission_status") or "NOT_ADMITTED",
                 "admission_approved_id": st.session_state.get("admission_review_id"),
                 "items":               items_payload,
+                "session_basket":      _get_basket(enrollee_id.strip()),
             }
             with st.spinner("KLAIRE is evaluating the PA request…"):
                 try:
                     resp = requests.post(f"{API}/api/v1/klaire/pa", json=payload, timeout=180)
                     resp.raise_for_status()
-                    st.session_state["pa_result"] = resp.json()
+                    _pa_resp = resp.json()
+                    st.session_state["pa_result"] = _pa_resp
+                    # Populate basket with immediately approved procedures
+                    _approved_basket_items = []
+                    for _pr in _pa_resp.get("items", []):
+                        if _pr.get("decision") == "APPROVE":
+                            _approved_basket_items.append({
+                                "procedure_code":  _pr.get("procedure_code", ""),
+                                "procedure_name":  _pr.get("procedure_name", ""),
+                                "diagnosis_codes": _pr.get("approved_diagnoses", []),
+                                "diagnosis_names": _pr.get("diag_names", {}),
+                                "quantity":        _pr.get("quantity", 1),
+                                "branch":          enc_type,
+                            })
+                    if _approved_basket_items:
+                        _add_to_basket(enrollee_id.strip(), _approved_basket_items)
                 except Exception as ex:
                     st.error(f"API error: {ex}")
 
@@ -1632,11 +1733,20 @@ elif "Agent Review" in mode:
                     agent = st.text_input("Agent", value="Agent", key=f"rv_agent_{rid}", label_visibility="collapsed")
                     notes = st.text_input("Notes", placeholder="Justification…", key=f"rv_notes_{rid}", label_visibility="collapsed")
                     if review_type in ("PA_OUTPATIENT", "PA_PREAUTH"):
+                        _rv_basket = {
+                            "enrollee_id":      rv.get("enrollee_id", ""),
+                            "procedure_code":   rv.get("procedure_code", ""),
+                            "procedure_name":   rv.get("procedure_name", ""),
+                            "approved_diagnoses": rv.get("approved_diagnoses", []),
+                            "diag_names":       rv.get("diag_names", {}),
+                            "quantity":         rv.get("quantity", 1),
+                            "branch":           "INPATIENT" if review_type == "PA_PREAUTH" else "OUTPATIENT",
+                        }
                         if st.button("✅ Agree with AI", key=f"rv_app_{rid}", use_container_width=True, type="primary", help="Confirm AI's individual rule results are correct"):
-                            _submit_review(rid, "AGREE", agent, notes)
+                            _submit_review(rid, "AGREE", agent, notes, basket_item=_rv_basket)
                             st.rerun()
                         if st.button("❌ Override AI", key=f"rv_den_{rid}", use_container_width=True, help="Disagree with AI — your decision overrides"):
-                            _submit_review(rid, "OVERRIDE", agent, notes)
+                            _submit_review(rid, "OVERRIDE", agent, notes, basket_item=_rv_basket)
                             st.rerun()
                     elif review_type == "PA_ADMISSION":
                         if st.button("✅ Approve Admission", key=f"rv_app_{rid}", use_container_width=True, type="primary"):

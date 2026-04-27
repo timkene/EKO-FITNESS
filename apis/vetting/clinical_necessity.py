@@ -101,11 +101,26 @@ class ClinicalNecessityEngine:
         enrollee_id: str,
         encounter_date: str,
         all_request_procedures: Optional[List[Dict]] = None,
+        session_basket: Optional[List[Dict]] = None,
     ) -> ClinicalNecessityResult:
         route      = self._extract_route(procedure_name, procedure_code)
         admission  = self._get_admission_status(enrollee_id, encounter_date)
         tests      = self._get_recent_tests(enrollee_id, encounter_date, days=3)
         prior_meds = self._get_recent_medications(enrollee_id, encounter_date, days=30)
+
+        # Merge session basket drugs into prior_meds (these were approved this session
+        # but are not yet in the live DB — treat them as same-day history)
+        if session_basket:
+            existing_codes = {m["code"].upper() for m in prior_meds}
+            for bitem in session_basket:
+                bcode = bitem.get("procedure_code", "").upper()
+                if bcode.startswith("DRG") and bcode not in existing_codes:
+                    prior_meds.append({
+                        "code": bcode,
+                        "name": bitem.get("procedure_name", bcode),
+                        "date": encounter_date,
+                    })
+                    existing_codes.add(bcode)
 
         return self._evaluate_with_ai(
             procedure_code=procedure_code,
@@ -394,6 +409,83 @@ class ClinicalNecessityEngine:
                 "assess whether the remaining components are still appropriate).\n"
             )
 
+        # ── Pattern-based clinical advisory flags injected into prompt ──────────
+        # These are pre-computed from request data so the AI doesn't have to
+        # infer patterns it consistently misses.
+        _clinical_flags: list[str] = []
+
+        # Flag: Topical analgesic + unspecified myalgia + concurrent systemic infection
+        # A topical gel/cream covers a localised area. Generalised infection myalgia
+        # (malaria, typhoid, pneumonia, influenza) requires systemic analgesia, not topical.
+        # Unspecified myalgia (M79.10/M7910) in the context of a systemic infection
+        # almost certainly represents generalised infection myalgia, not a distinct local complaint.
+        _diag_normalised = diagnosis_code.replace(".", "").upper()
+        _is_unspecified_msk = (
+            _diag_normalised in {"M7910", "M791", "M793", "M7930", "M797", "M7970"}
+            or _diag_normalised.startswith(("M791", "M793"))
+        )
+        _SYSTEMIC_INFECTION_PREFIXES = (
+            "B50", "B51", "B52", "B53", "B54",  # Malaria
+            "J18", "J10", "J11", "J12", "J13", "J14", "J15", "J16", "J17",  # Pneumonia/influenza
+            "A01", "A02", "A09", "A40", "A41",  # Typhoid, GI infections, Sepsis
+            "B00", "B01", "B02",                # Viral infections
+        )
+        if route == "TOPICAL" and _is_unspecified_msk and all_request_procedures:
+            _infection_in_regimen: list[str] = []
+            _systemic_analgesics_in_regimen: list[str] = []
+            _ORAL_ANALGESIC_KEYWORDS = [
+                "PARACETAMOL", "ACETAMINOPHEN", "IBUPROFEN", "DICLOFENAC TAB",
+                "NAPROXEN", "TRAMADOL", "CODEINE", "ASPIRIN",
+            ]
+            for _p in all_request_procedures:
+                _pd = _p.get("diagnosis_code", "").replace(".", "").upper()
+                if any(_pd.startswith(pfx) for pfx in _SYSTEMIC_INFECTION_PREFIXES):
+                    _infection_in_regimen.append(
+                        f"{_p.get('diagnosis_code', _pd)} ({_p.get('diagnosis_name', _pd)})"
+                    )
+                _pname = _p.get("procedure_name", "").upper()
+                if (
+                    _p.get("procedure_code") != procedure_code
+                    and any(kw in _pname for kw in _ORAL_ANALGESIC_KEYWORDS)
+                ):
+                    _systemic_analgesics_in_regimen.append(_p.get("procedure_name", ""))
+
+            if _infection_in_regimen:
+                _analgesic_note = (
+                    f" A systemic oral analgesic is already in this regimen "
+                    f"({', '.join(_systemic_analgesics_in_regimen)}), which covers "
+                    f"generalised pain systemically."
+                    if _systemic_analgesics_in_regimen else ""
+                )
+                _clinical_flags.append(
+                    f"⚠️ CLINICAL FLAG — TOPICAL ANALGESIC + UNSPECIFIED MYALGIA + SYSTEMIC INFECTION:\n"
+                    f"  The diagnosis is '{diagnosis_name}' ({diagnosis_code}) — UNSPECIFIED SITE — "
+                    f"in the context of a concurrent systemic infection in this regimen: "
+                    f"{'; '.join(_infection_in_regimen)}.\n"
+                    f"  Systemic infections such as malaria, pneumonia, and typhoid routinely cause "
+                    f"GENERALISED body aches and myalgia as a symptom. A topical gel or cream "
+                    f"applied to a surface area cannot relieve generalised infection myalgia — "
+                    f"it only works on a localised anatomical site.{_analgesic_note}\n"
+                    f"  KEY QUESTION: Is this a DISTINCT localised musculoskeletal complaint "
+                    f"(e.g. knee arthralgia, low back pain, shoulder strain) that is SEPARATE "
+                    f"from the systemic infection? If it were genuinely localised, the provider "
+                    f"would typically use a site-specific ICD-10 code (e.g. M54.5 for low back pain, "
+                    f"M79.11 for neck myalgia, M25.5x for specific joint pain) rather than the "
+                    f"UNSPECIFIED code {diagnosis_code}. The unspecified code combined with an active "
+                    f"systemic infection strongly suggests this is generalised infection myalgia "
+                    f"being separately coded to justify the topical NSAID.\n"
+                    f"  YOU MUST address this in your reasoning. If you approve, explicitly confirm "
+                    f"why you believe this is a distinct localised complaint despite the unspecified code."
+                )
+
+        _clinical_flags_ctx = (
+            "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "PRE-COMPUTED CLINICAL FLAGS (review carefully)\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            + "\n\n".join(_clinical_flags)
+            if _clinical_flags else ""
+        )
+
         # WHO EML + RxClass enrichment for AI prompt
         _who = who_eml_lookup(procedure_name)
         _who_ctx = (
@@ -458,7 +550,7 @@ Prior medications (last 30 days):
 
 Step-therapy (RxClass same-class check):
 {_step_therapy_ctx}
-{_bnf_ctx}
+{_bnf_ctx}{_clinical_flags_ctx}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CLINICAL NECESSITY EVALUATION
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
