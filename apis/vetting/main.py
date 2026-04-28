@@ -1623,13 +1623,24 @@ def klaire_submit_review(review_id: str, action: KlaireReviewAction):
         raise HTTPException(status_code=409, detail=f"Review {review_id} is already {doc['status']}")
 
     now = datetime.now().isoformat()
-    # For combo-escalated procedures, "AGREE" means agreeing with the AI's DENY recommendation.
-    ai_rec = doc.get("ai_recommendation", "APPROVE")
-    if action.action == "AGREE" and ai_rec == "DENY":
-        status = "HUMAN_DENIED"
-    elif action.action in ("APPROVE", "AGREE"):
-        status = "HUMAN_APPROVED"
+    # For PA items (PA_OUTPATIENT/PA_PREAUTH), ai_recommendation is stored as "PENDING_REVIEW"
+    # — the actual AI decision lives in first_line.decision (APPROVE or DENY).
+    # For specialist/admission reviews, ai_recommendation holds the real value.
+    review_type_early = doc.get("review_type", "SPECIALIST")
+    if review_type_early in ("PA_OUTPATIENT", "PA_PREAUTH"):
+        ai_rec = (doc.get("first_line") or {}).get("decision", "APPROVE")
     else:
+        ai_rec = doc.get("ai_recommendation", "APPROVE")
+
+    if action.action == "AGREE":
+        # Agent agrees with whatever AI decided
+        status = "HUMAN_DENIED" if ai_rec == "DENY" else "HUMAN_APPROVED"
+    elif action.action == "OVERRIDE":
+        # Agent DISAGREES with AI — flip the AI's decision
+        status = "HUMAN_APPROVED" if ai_rec == "DENY" else "HUMAN_DENIED"
+    elif action.action == "APPROVE":
+        status = "HUMAN_APPROVED"
+    else:  # DENY
         status = "HUMAN_DENIED"
 
     mongo_db.update_klaire_review(review_id, {
@@ -1677,18 +1688,8 @@ def klaire_submit_review(review_id: str, action: KlaireReviewAction):
                         approved_by=action.reviewed_by or "agent",
                     )
 
-        else:  # OVERRIDE — agent disagrees with AI
-            is_valid_override = (status == "HUMAN_APPROVED")
-            outcome_label     = "approved" if is_valid_override else "denied"
-            for dc in all_diag_codes:
-                dn = diag_names.get(dc, dc)
-                mongo_db.upsert_procedure_diagnosis_learning(
-                    proc_code, proc_name, dc, dn,
-                    is_valid=is_valid_override,
-                    confidence=90,
-                    reasoning=f"Agent override: {outcome_label}. {agent_note}".strip(),
-                    approved_by=action.reviewed_by or "agent",
-                )
+        else:  # OVERRIDE — agent disagrees with AI; no learning written
+            pass
 
         message = f"Decision recorded for {proc_code}."
 

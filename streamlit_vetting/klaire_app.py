@@ -331,9 +331,12 @@ def _submit_review(review_id: str, action: str, reviewed_by: str, notes: str, ba
         )
         resp.raise_for_status()
         data = resp.json()
-        if action in ("APPROVE", "AGREE"):
-            st.success(f"✅ {data.get('message', 'Agreed with AI — learning recorded.')}")
-            # Add to basket so later requests see this as today's history
+        # Use API-returned status as source of truth (handles OVERRIDE correctly:
+        # overriding an AI deny = HUMAN_APPROVED; overriding an AI approve = HUMAN_DENIED)
+        effective_approved = data.get("status") == "HUMAN_APPROVED"
+
+        if effective_approved:
+            st.success(f"✅ {data.get('message', 'Decision recorded.')}")
             if basket_item and basket_item.get("enrollee_id") and basket_item.get("procedure_code"):
                 _add_to_basket(basket_item["enrollee_id"], [{
                     "procedure_code": basket_item.get("procedure_code", ""),
@@ -344,8 +347,7 @@ def _submit_review(review_id: str, action: str, reviewed_by: str, notes: str, ba
                     "branch": basket_item.get("branch", ""),
                 }])
         else:
-            st.warning(f"⚠️ {data.get('message', 'AI overridden — decision recorded.')}")
-            # Remove from basket if it was previously added (agent is now denying it)
+            st.warning(f"⚠️ {data.get('message', 'Decision recorded.')}")
             if basket_item and basket_item.get("enrollee_id") and basket_item.get("procedure_code"):
                 _remove_from_basket(basket_item["enrollee_id"], basket_item["procedure_code"])
 
@@ -353,14 +355,13 @@ def _submit_review(review_id: str, action: str, reviewed_by: str, notes: str, ba
         if "pa_result" in st.session_state:
             pa    = st.session_state["pa_result"]
             items = pa.get("items", [])
-            new_d = "APPROVED_BY_AGENT" if action in ("APPROVE", "AGREE") else "DENIED_BY_AGENT"
+            new_d = "APPROVED_BY_AGENT" if effective_approved else "DENIED_BY_AGENT"
             for item in items:
                 if item.get("review_id") == review_id:
                     item["decision"] = new_d
-                    # Sync basket with agent decision
                     enr_id = pa.get("enrollee_id", "")
                     if enr_id:
-                        if action in ("APPROVE", "AGREE"):
+                        if effective_approved:
                             _add_to_basket(enr_id, [{
                                 "procedure_code": item.get("procedure_code", ""),
                                 "procedure_name": item.get("procedure_name", ""),
