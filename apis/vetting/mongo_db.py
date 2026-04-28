@@ -124,33 +124,43 @@ def upsert_procedure_diagnosis_learning(
     approved_by: str,
 ):
     """Write or update a procedure-diagnosis compatibility entry after agent review.
-    Agent confirmation makes the entry immediately trusted (admin_approved=True)
-    so the next identical request auto-decides without AI or agent review.
+    Trusted (admin_approved=True) only after more than 3 agent confirmations —
+    a single confirmation must not auto-approve future identical requests.
     """
     now = datetime.utcnow().isoformat()
+    col = _col("ai_human_procedure_diagnosis")
+    filter_doc = {
+        "procedure_code": procedure_code.upper(),
+        "diagnosis_code": diagnosis_code.upper(),
+    }
     try:
-        _col("ai_human_procedure_diagnosis").update_one(
-            {"procedure_code": procedure_code.upper(), "diagnosis_code": diagnosis_code.upper()},
+        col.update_one(
+            filter_doc,
             {
                 "$setOnInsert": {
-                    "procedure_name": procedure_name,
-                    "diagnosis_name": diagnosis_name,
-                    "created_at":     now,
+                    "procedure_name":          procedure_name,
+                    "diagnosis_name":          diagnosis_name,
+                    "created_at":              now,
+                    "admin_approved":          False,
+                    "human_confirmation_count": 0,
                 },
                 "$set": {
-                    "is_valid_match":    is_valid,
-                    "match_reason":      reasoning,
-                    "ai_confidence":     confidence,
-                    "ai_reasoning":      reasoning,
-                    "approved_by":       approved_by,
-                    "approved_date":     now,
-                    "last_used_date":    now,
-                    "admin_approved":    True,   # agent confirmation = immediately trusted
-                    "admin_approved_at": now,
+                    "is_valid_match":  is_valid,
+                    "match_reason":    reasoning,
+                    "ai_confidence":   confidence,
+                    "ai_reasoning":    reasoning,
+                    "approved_by":     approved_by,
+                    "approved_date":   now,
+                    "last_used_date":  now,
                 },
-                "$inc": {"usage_count": 1},
+                "$inc": {"usage_count": 1, "human_confirmation_count": 1},
             },
             upsert=True,
+        )
+        # Promote to trusted only after more than 3 agent confirmations
+        col.update_one(
+            {**filter_doc, "human_confirmation_count": {"$gt": 3}},
+            {"$set": {"admin_approved": True, "admin_approved_at": now}},
         )
     except Exception as e:
         logger.warning(f"upsert_procedure_diagnosis_learning: {e}")
@@ -573,36 +583,17 @@ def update_first_line_decision(
 
 def is_learning_trusted(doc: dict) -> bool:
     """
-    Dynamic trust threshold for auto-decisions.
+    Trust threshold for auto-decisions.
 
-    a) admin_approved == True  → always trusted (supervisor override)
-    b) Human-confirmed (approved_by set or source='human') + usage-based threshold:
-         usage >= 50  → trusted after 1 confirmation  (very stable, high-frequency pair)
-         usage >= 20  → trusted after 2 confirmations
-         usage >= 3   → trusted after 3 confirmations  (default)
-         usage < 3    → never auto-trusted
-
-    Higher frequency = more evidence the AI decision is stable = lower threshold.
-    This reduces review queue for common pairs (amoxicillin + URTI seen 100×)
-    while keeping tighter oversight for rarely-seen combinations.
+    a) admin_approved == True  → trusted (set automatically after >3 agent confirmations,
+                                           or manually by admin)
+    b) Fallback: human_confirmation_count > 3 regardless of usage frequency —
+                 a one-time confirmation must never auto-approve future requests.
     """
     if doc.get("admin_approved") is True:
         return True
-    usage = int(doc.get("usage_count", 0))
-    if usage < 3:
-        return False
-    human_confirmed = bool(doc.get("approved_by")) or doc.get("source") == "human"
-    if not human_confirmed:
-        return False
-    # Dynamic: reduce required confirmations as frequency grows
-    if usage >= 50:
-        required_confirmations = 1
-    elif usage >= 20:
-        required_confirmations = 2
-    else:
-        required_confirmations = 3
-    confirmations = int(doc.get("human_confirmation_count", 1 if human_confirmed else 0))
-    return confirmations >= required_confirmations
+    confirmations = int(doc.get("human_confirmation_count", 0))
+    return confirmations > 3
 
 
 # ── Admin learning-table management ──────────────────────────────────────────
