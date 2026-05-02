@@ -1814,8 +1814,8 @@ def admin_matchday_groups(matchday_id: int, payload: dict = Depends(require_admi
     rows = conn.execute("""
         SELECT mg.id, mg.group_index, mgm.player_id, p.baller_name, p.first_name, p.surname, p.jersey_number
         FROM FOOTBALL.matchday_groups mg
-        JOIN FOOTBALL.matchday_group_members mgm ON mgm.group_id = mg.id AND mgm.matchday_id = mg.matchday_id
-        JOIN FOOTBALL.players p ON p.id = mgm.player_id
+        LEFT JOIN FOOTBALL.matchday_group_members mgm ON mgm.group_id = mg.id AND mgm.matchday_id = mg.matchday_id
+        LEFT JOIN FOOTBALL.players p ON p.id = mgm.player_id
         WHERE mg.matchday_id = ?
         ORDER BY mg.group_index, p.baller_name
     """, [matchday_id]).fetchall()
@@ -1824,7 +1824,8 @@ def admin_matchday_groups(matchday_id: int, payload: dict = Depends(require_admi
         gid, gidx, pid, baller, first, last, jersey = r
         if gid not in groups_dict:
             groups_dict[gid] = {"group_id": gid, "group_index": gidx, "members": []}
-        groups_dict[gid]["members"].append({"player_id": pid, "baller_name": baller, "first_name": first, "surname": last, "jersey_number": jersey})
+        if pid is not None:
+            groups_dict[gid]["members"].append({"player_id": pid, "baller_name": baller, "first_name": first, "surname": last, "jersey_number": jersey})
     # Others is in every group (5 voted + 1 Others = max 6 per group). Append for display.
     others_id = _others_id(matchday_id)
     for g in groups_dict.values():
