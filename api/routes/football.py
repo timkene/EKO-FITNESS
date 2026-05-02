@@ -1060,14 +1060,7 @@ def admin_create_matchday(body: CreateMatchdayBody, payload: dict = Depends(requ
     closes_ts = closes_at.strftime("%Y-%m-%d %H:%M:%S")
     conn = get_conn()
     try:
-        # Always use max(sequence, MAX_existing+1) so a reset sequence can never produce a duplicate id
-        seq_id = 0
-        try:
-            seq_id = conn.execute("SELECT nextval('FOOTBALL.matchday_id_seq')").fetchone()[0]
-        except Exception:
-            pass
-        max_existing = conn.execute("SELECT COALESCE(MAX(id), 0) FROM FOOTBALL.matchdays").fetchone()[0]
-        next_id = max(int(seq_id), int(max_existing) + 1)
+        next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.matchdays").fetchone()[0]
         conn.execute("""
             INSERT INTO FOOTBALL.matchdays (id, sunday_date, status, voting_opens_at, voting_closes_at, groups_published, fixtures_published, matchday_ended)
             VALUES (?, ?, 'voting_open', ?, ?, false, false, false)
@@ -1086,8 +1079,11 @@ def admin_list_matchdays(payload: dict = Depends(require_admin)):
     rows = conn.execute("""
         SELECT id, sunday_date, status, voting_opens_at, voting_closes_at, created_at, reviewed_at,
                COALESCE(groups_published, false), COALESCE(fixtures_published, false), COALESCE(matchday_ended, false)
-        FROM FOOTBALL.matchdays
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY voting_opens_at DESC) = 1
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY id ORDER BY voting_opens_at DESC) AS _rn
+            FROM FOOTBALL.matchdays
+        ) sub
+        WHERE _rn = 1
         ORDER BY sunday_date DESC, id DESC
     """).fetchall()
     return {"success": True, "matchdays": [_matchday_row_to_dict(conn, r) for r in rows]}
@@ -1139,8 +1135,11 @@ def member_list_matchdays(payload: dict = Depends(require_player)):
     rows = conn.execute("""
         SELECT id, sunday_date, status, voting_opens_at, voting_closes_at, created_at, reviewed_at,
                COALESCE(groups_published, false), COALESCE(fixtures_published, false), COALESCE(matchday_ended, false)
-        FROM FOOTBALL.matchdays
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY voting_opens_at DESC) = 1
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY id ORDER BY voting_opens_at DESC) AS _rn
+            FROM FOOTBALL.matchdays
+        ) sub
+        WHERE _rn = 1
         ORDER BY sunday_date DESC, id DESC
     """).fetchall()
     matchdays = [_matchday_row_to_dict(conn, r) for r in rows]

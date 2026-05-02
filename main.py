@@ -1,17 +1,10 @@
 """
 Eko Football API - FastAPI backend for Eko React app only.
-Run: uvicorn main_eko:app --host 0.0.0.0 --port 8000
+Run: uvicorn main:app --host 0.0.0.0 --port 8000
 """
 import os
-from pathlib import Path
-from datetime import date
-
 from dotenv import load_dotenv
 load_dotenv()
-
-from core import database as _core_db
-os.environ.setdefault("DUCKDB_PATH", str(Path(_core_db.DB_PATH).resolve()))
-os.environ["USE_SHARED_DB_CONNECTION"] = "1"
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,19 +13,18 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from api.routes import football
-from core.database import get_db_connection, close_all_connections, get_database_info, USE_LOCAL_DB
+from core.database import get_db_connection, close_all_connections, get_database_info
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: ensure FOOTBALL schema and tables exist. Shutdown: close DB."""
+    """Startup: ensure all tables exist. Shutdown: close DB connection."""
     print("Starting Eko Football API...")
     try:
         conn = get_db_connection()
         conn.execute("SELECT 1")
-        conn.execute("CREATE SCHEMA IF NOT EXISTS FOOTBALL")
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.players (
+            CREATE TABLE IF NOT EXISTS players (
                 id INTEGER PRIMARY KEY,
                 first_name VARCHAR NOT NULL,
                 surname VARCHAR NOT NULL,
@@ -46,19 +38,14 @@ async def lifespan(app: FastAPI):
                 year_registered INTEGER,
                 created_at TIMESTAMP DEFAULT current_timestamp,
                 approved_at TIMESTAMP,
-                suspended BOOLEAN DEFAULT false
+                suspended BOOLEAN DEFAULT false,
+                avatar_access BOOLEAN DEFAULT false,
+                avatar_locked BOOLEAN DEFAULT false,
+                avatar_url VARCHAR
             )
         """)
-        for sql in [
-            "ALTER TABLE FOOTBALL.players ADD COLUMN suspended BOOLEAN DEFAULT false",
-            "ALTER TABLE FOOTBALL.players ADD COLUMN password_display VARCHAR",
-        ]:
-            try:
-                conn.execute(sql)
-            except Exception:
-                pass
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.dues (
+            CREATE TABLE IF NOT EXISTS dues (
                 id INTEGER PRIMARY KEY,
                 player_id INTEGER NOT NULL,
                 year INTEGER NOT NULL,
@@ -70,12 +57,8 @@ async def lifespan(app: FastAPI):
                 UNIQUE(player_id, year, quarter)
             )
         """)
-        try:
-            conn.execute("ALTER TABLE FOOTBALL.dues ADD COLUMN waiver_due_by DATE")
-        except Exception:
-            pass
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.matchdays (
+            CREATE TABLE IF NOT EXISTS matchdays (
                 id INTEGER PRIMARY KEY,
                 sunday_date DATE NOT NULL,
                 status VARCHAR NOT NULL DEFAULT 'voting_open',
@@ -88,31 +71,13 @@ async def lifespan(app: FastAPI):
                 matchday_ended BOOLEAN DEFAULT false
             )
         """)
-        for sql in [
-            "ALTER TABLE FOOTBALL.matchdays ADD COLUMN fixtures_published BOOLEAN DEFAULT false",
-            "ALTER TABLE FOOTBALL.matchdays ADD COLUMN matchday_ended BOOLEAN DEFAULT false",
-        ]:
-            try:
-                conn.execute(sql)
-            except Exception:
-                pass
-        try:
-            conn.execute("CREATE SEQUENCE IF NOT EXISTS FOOTBALL.matchday_id_seq START 1")
-            r = conn.execute("SELECT COALESCE(MAX(id), 0) FROM FOOTBALL.matchdays").fetchone()
-            if r and r[0] and r[0] > 0:
-                try:
-                    conn.execute("SELECT setval('FOOTBALL.matchday_id_seq', ?)", [r[0]])
-                except Exception:
-                    pass
-        except Exception:
-            pass
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.matchday_fixtures (
+            CREATE TABLE IF NOT EXISTS matchday_fixtures (
                 id INTEGER PRIMARY KEY,
                 matchday_id INTEGER NOT NULL,
                 group_a_id INTEGER NOT NULL,
                 group_b_id INTEGER NOT NULL,
-                status VARCHAR NOT NULL DEFAULT 'pending',
+                status VARCHAR NOT NULL DEFAULT 'scheduled',
                 home_goals INTEGER DEFAULT 0,
                 away_goals INTEGER DEFAULT 0,
                 started_at TIMESTAMP,
@@ -121,7 +86,7 @@ async def lifespan(app: FastAPI):
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.fixture_goals (
+            CREATE TABLE IF NOT EXISTS fixture_goals (
                 id INTEGER PRIMARY KEY,
                 fixture_id INTEGER NOT NULL,
                 scorer_player_id INTEGER NOT NULL,
@@ -131,7 +96,7 @@ async def lifespan(app: FastAPI):
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.matchday_votes (
+            CREATE TABLE IF NOT EXISTS matchday_votes (
                 id INTEGER PRIMARY KEY,
                 matchday_id INTEGER NOT NULL,
                 player_id INTEGER NOT NULL,
@@ -140,7 +105,7 @@ async def lifespan(app: FastAPI):
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.matchday_groups (
+            CREATE TABLE IF NOT EXISTS matchday_groups (
                 id INTEGER PRIMARY KEY,
                 matchday_id INTEGER NOT NULL,
                 group_index INTEGER NOT NULL,
@@ -148,7 +113,7 @@ async def lifespan(app: FastAPI):
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.matchday_group_members (
+            CREATE TABLE IF NOT EXISTS matchday_group_members (
                 id INTEGER PRIMARY KEY,
                 matchday_id INTEGER NOT NULL,
                 group_id INTEGER NOT NULL,
@@ -157,7 +122,7 @@ async def lifespan(app: FastAPI):
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.matchday_attendance (
+            CREATE TABLE IF NOT EXISTS matchday_attendance (
                 matchday_id INTEGER NOT NULL,
                 player_id INTEGER NOT NULL,
                 present BOOLEAN NOT NULL DEFAULT true,
@@ -165,7 +130,7 @@ async def lifespan(app: FastAPI):
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.fixture_ratings (
+            CREATE TABLE IF NOT EXISTS fixture_ratings (
                 fixture_id INTEGER NOT NULL,
                 player_id INTEGER NOT NULL,
                 rating REAL NOT NULL,
@@ -173,7 +138,7 @@ async def lifespan(app: FastAPI):
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.matchday_cards (
+            CREATE TABLE IF NOT EXISTS matchday_cards (
                 matchday_id INTEGER NOT NULL,
                 player_id INTEGER NOT NULL,
                 yellow_count INTEGER NOT NULL DEFAULT 0,
@@ -182,7 +147,7 @@ async def lifespan(app: FastAPI):
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.fixture_cards (
+            CREATE TABLE IF NOT EXISTS fixture_cards (
                 id INTEGER PRIMARY KEY,
                 fixture_id INTEGER NOT NULL,
                 player_id INTEGER NOT NULL,
@@ -190,31 +155,30 @@ async def lifespan(app: FastAPI):
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS FOOTBALL.payment_evidence (
+            CREATE TABLE IF NOT EXISTS payment_evidence (
                 id INTEGER PRIMARY KEY,
                 player_id INTEGER NOT NULL,
                 year INTEGER NOT NULL,
                 quarter INTEGER NOT NULL,
                 file_path VARCHAR NOT NULL,
                 file_name VARCHAR NOT NULL,
+                file_content BYTEA,
                 status VARCHAR NOT NULL DEFAULT 'pending',
                 submitted_at TIMESTAMP DEFAULT current_timestamp,
                 reviewed_at TIMESTAMP,
                 delete_after DATE
             )
         """)
-        try:
-            conn.execute("ALTER TABLE FOOTBALL.payment_evidence ADD COLUMN file_content BLOB")
-        except Exception:
-            pass
-        # Seed fake players only in local dev (not in production/MotherDuck) so deletions persist
-        if USE_LOCAL_DB:
-            try:
-                from api.routes.football import seed_fake_football_players
-                seed_fake_football_players(conn)
-            except Exception:
-                pass
-        print("FOOTBALL schema ready")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS matchday_motm (
+                matchday_id INTEGER NOT NULL,
+                player_id INTEGER NOT NULL,
+                sunday_date DATE,
+                PRIMARY KEY (matchday_id, player_id)
+            )
+        """)
+        db_info = get_database_info()
+        print(f"Database tables ready ({db_info['type']})")
     except Exception as e:
         print(f"Startup warning: {e}")
     yield
