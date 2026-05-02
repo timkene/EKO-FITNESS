@@ -105,7 +105,7 @@ class ClinicalNecessityEngine:
     ) -> ClinicalNecessityResult:
         route      = self._extract_route(procedure_name, procedure_code)
         admission  = self._get_admission_status(enrollee_id, encounter_date)
-        tests      = self._get_recent_tests(enrollee_id, encounter_date, days=3)
+        tests      = self._get_recent_tests(enrollee_id, encounter_date, days=7)
         prior_meds = self._get_recent_medications(enrollee_id, encounter_date, days=30)
 
         # Merge session basket drugs into prior_meds (these were approved this session
@@ -360,7 +360,7 @@ class ClinicalNecessityEngine:
             "\n".join(
                 f"  - {t['code']}: {t['name']} [{t['date']}]"
                 for t in recent_tests
-            ) if recent_tests else "  None found in last 3 days"
+            ) if recent_tests else "  None found in last 7 days"
         )
 
         meds_ctx = (
@@ -542,7 +542,7 @@ PATIENT CONTEXT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Admission Status : {admission_ctx}
 
-Tests/procedures done (last 3 days):
+Tests/procedures done (last 7 days):
 {tests_ctx}
 
 Prior medications (last 30 days):
@@ -636,7 +636,7 @@ Respond ONLY in valid JSON (no markdown):
             if step_down:
                 parts.append("✅ Step-down: prior injectable found — oral is appropriate.")
             if tests_required and not tests_found:
-                parts.append(f"⚠️ NO TESTS: {', '.join(tests_required)} not found in last 3 days.")
+                parts.append(f"⚠️ NO TESTS: {', '.join(tests_required)} not found in last 7 days.")
             elif tests_required and tests_found:
                 parts.append(f"✅ Tests confirmed: {', '.join(tests_found)}.")
             if concerns:
