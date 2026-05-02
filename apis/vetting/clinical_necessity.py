@@ -560,9 +560,24 @@ class ClinicalNecessityEngine:
         if _rx_classes and recent_meds:
             _rx_lower = {c.lower() for c in _rx_classes}
             for m in recent_meds[-20:]:
-                m_classes = rxclass_get_drug_classes(m.get("name", ""))
-                if any(mc.lower() in _rx_lower for mc in m_classes):
-                    _same_class_priors.append(f"{m['name']} [{m['date']}]")
+                mname = m.get("name", "")
+                # Split combination products (e.g. "CLOTRIMAZOLE/METRONIDAZOLE/LACTOBACILLUS")
+                # and check each component individually — RxClass cannot resolve combo strings
+                _components = [c.strip() for c in mname.replace("+", "/").split("/") if c.strip()]
+                if not _components:
+                    _components = [mname]
+                _matched_component = None
+                for _comp in _components:
+                    m_classes = rxclass_get_drug_classes(_comp)
+                    if any(mc.lower() in _rx_lower for mc in m_classes):
+                        _matched_component = _comp
+                        break
+                if _matched_component:
+                    label = (
+                        f"{mname} [via {_matched_component}] [{m['date']}]"
+                        if len(_components) > 1 else f"{mname} [{m['date']}]"
+                    )
+                    _same_class_priors.append(label)
 
         _step_therapy_ctx = (
             "Prior same-class medications confirmed (RxClass): " + ", ".join(_same_class_priors[:3])
