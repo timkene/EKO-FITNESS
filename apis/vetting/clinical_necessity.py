@@ -561,9 +561,11 @@ class ClinicalNecessityEngine:
             _rx_lower = {c.lower() for c in _rx_classes}
             for m in recent_meds[-20:]:
                 mname = m.get("name", "")
-                # Split combination products (e.g. "CLOTRIMAZOLE/METRONIDAZOLE/LACTOBACILLUS")
-                # and check each component individually — RxClass cannot resolve combo strings
-                _components = [c.strip() for c in mname.replace("+", "/").split("/") if c.strip()]
+                # Split combination products separated by /, +, or comma
+                # e.g. "CLOTRIMAZOLE/METRONIDAZOLE/LACTOBACILLUS" or
+                #      "Clotrimazole, Betamethasone Dipropionate, Neomycin Sulfate"
+                # RxClass cannot resolve combo strings — check each component individually
+                _components = [c.strip() for c in re.split(r"[/+,]", mname) if c.strip()]
                 if not _components:
                     _components = [mname]
                 _matched_component = None
