@@ -478,6 +478,61 @@ class ClinicalNecessityEngine:
                     f"why you believe this is a distinct localised complaint despite the unspecified code."
                 )
 
+        # Flag: Antibiotic for UTI/genitourinary diagnosis when prior meds show
+        # a vaginal infection treatment combo (antifungal + metronidazole/antibacterial
+        # + probiotic). This pattern suggests the prior episode was BV/candidiasis/
+        # trichomoniasis rather than a true UTI. Requesting a systemic antibiotic for
+        # the same ICD-10 code without culture-guided selection warrants scrutiny.
+        _UTI_GU_PREFIXES = ("N39", "N30", "N34", "N76", "N77", "N72", "N73", "N74")
+        _VAGINAL_INFECTION_DRUGS = [
+            "CLOTRIMAZOLE", "MICONAZOLE", "FLUCONAZOLE", "CANESTEN",
+            "METRONIDAZOLE", "METROGEL", "FLAGYL",
+            "LACTOBACILLUS", "TINIDAZOLE", "SECNIDAZOLE", "ORNIDAZOLE",
+            "NYSTATIN", "ITRACONAZOLE", "KETOCONAZOLE",
+        ]
+        _ANTIBIOTIC_KEYWORDS = [
+            "CIPROFLOXACIN", "AMOXICILLIN", "NITROFURANTOIN", "TRIMETHOPRIM",
+            "COTRIMOXAZOLE", "CEPHALEXIN", "AZITHROMYCIN", "DOXYCYCLINE",
+            "LEVOFLOXACIN", "OFLOXACIN", "CEFALEXIN", "AMPICILLIN",
+            "CLARITHROMYCIN", "ERYTHROMYCIN", "GENTAMICIN", "CEFUROXIME",
+        ]
+        _is_gu_diagnosis = _diag_normalised.startswith(_UTI_GU_PREFIXES)
+        _proc_upper = procedure_name.upper()
+        _is_antibiotic_request = any(ab in _proc_upper for ab in _ANTIBIOTIC_KEYWORDS)
+
+        if _is_gu_diagnosis and _is_antibiotic_request and recent_meds:
+            _vaginal_drugs_found: list[str] = []
+            for _m in recent_meds:
+                _mname = _m.get("name", "").upper()
+                for _vd in _VAGINAL_INFECTION_DRUGS:
+                    if _vd in _mname and _m.get("name") not in _vaginal_drugs_found:
+                        _vaginal_drugs_found.append(_m.get("name", _vd))
+                        break
+            if len(_vaginal_drugs_found) >= 2:
+                _vaginal_list = ", ".join(_vaginal_drugs_found)
+                _clinical_flags.append(
+                    f"⚠️ CLINICAL FLAG — VAGINAL INFECTION TREATMENT PATTERN + GENITOURINARY ANTIBIOTIC REQUEST:\n"
+                    f"  The current request is for {procedure_name} (an antibiotic) for diagnosis "
+                    f"{diagnosis_name} ({diagnosis_code}).\n"
+                    f"  Prior medications in the last 30 days include: {_vaginal_list}.\n"
+                    f"  This combination — antifungal + antibacterial + probiotic — is the classic "
+                    f"treatment pattern for bacterial vaginosis (BV), vulvovaginal candidiasis, or "
+                    f"mixed vaginal infection, NOT for urinary tract infection. These drugs act locally "
+                    f"on vaginal flora and have no role in treating UTI.\n"
+                    f"  KEY QUESTIONS you MUST address:\n"
+                    f"  1. Was the prior treatment for a VAGINAL infection (BV/candidiasis) that was "
+                    f"incorrectly or loosely coded as {diagnosis_code} (UTI)? N390 is sometimes used "
+                    f"as a catch-all for lower genitourinary complaints in Nigerian HMO coding.\n"
+                    f"  2. If both episodes are genuinely UTI, why was an antifungal prescribed for "
+                    f"the first one? Antifungals do not treat bacterial UTI.\n"
+                    f"  3. Are culture/sensitivity results (HVS M/C/S or urine M/C/S) available from "
+                    f"the previous episode to guide this antibiotic choice? Empirical fluoroquinolone "
+                    f"selection without sensitivity data conflicts with antimicrobial stewardship.\n"
+                    f"  4. Is this a distinct new UTI episode, or is the antibiotic now being added "
+                    f"because the vaginal infection treatment failed to resolve symptoms?\n"
+                    f"  YOU MUST raise these questions explicitly in your reasoning."
+                )
+
         _clinical_flags_ctx = (
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "PRE-COMPUTED CLINICAL FLAGS (review carefully)\n"
