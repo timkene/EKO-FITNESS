@@ -2204,52 +2204,190 @@ def _star_rating_by_quartile(conn, _cache: Optional[dict] = None) -> dict:
     return stars
 
 
-@router.get("/member/stats")
-def member_my_stats(payload: dict = Depends(require_player)):
-    """Current member's career stats. Fast-path reuses leaderboard cache; slow-path computes all players once
-    and caches leaderboard + top_three as a side-effect so subsequent calls are instant."""
-    player_id = int(payload["sub"])
-    cache_key = f"stats:{player_id}"
-    cached = _sc_get(cache_key)
-    if cached is not None:
-        return JSONResponse(content=cached, headers=NO_CACHE_HEADERS)
-    conn = get_conn()
-    cache = {}
+def _bulk_leaderboard_stats(conn, player_rows: list) -> list:
+    """
+    Compute career stats for all players using ~12 bulk SQL queries.
+    Replaces the old per-player loop (~300+ queries for 39 players) so cold-start
+    leaderboard loads in <1 s instead of timing out.
+    player_rows: list of (id, baller_name, jersey_number).
+    Returns list of stat dicts (one per player, sorted by baller_name).
+    """
+    from collections import defaultdict
 
-    # Fast path: leaderboard already cached — only compute this player's own data
-    lb = _sc_get("leaderboard")
-    if lb is not None:
-        stats = _player_career_stats(conn, player_id, cache)
-        rank, star_rating = None, 0
-        for i, row in enumerate(lb["leaderboard"], 1):
-            if row["player_id"] == player_id:
-                rank = i
-                star_rating = row.get("star_rating", 0)
-                break
-        _ensure_avatar_columns(conn)
-        av_row = conn.execute("SELECT avatar_url FROM FOOTBALL.players WHERE id = ?", [player_id]).fetchone()
-        result = {"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating,
-                  "avatar_url": (av_row[0] if av_row else None) or ""}
-        _sc_set(cache_key, result)
-        return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
+    total_ended = conn.execute(
+        "SELECT COUNT(*) FROM FOOTBALL.matchdays WHERE COALESCE(matchday_ended, false) = true"
+    ).fetchone()[0] or 1
 
-    # Slow path: compute all players ONCE (was being computed twice before), cache leaderboard + top_three as bonus
-    all_players = conn.execute(
-        "SELECT id, baller_name, jersey_number FROM FOOTBALL.players WHERE status = 'approved' AND id > 0 ORDER BY baller_name"
-    ).fetchall()
-    lb_out = []
-    my_stats = None
-    for pid, baller, jersey in all_players:
-        s = _player_career_stats(conn, pid, cache)
-        if pid == player_id:
-            my_stats = s
-        lb_out.append({
+    goals_by_pid = dict(conn.execute(
+        "SELECT scorer_player_id, COUNT(*) FROM FOOTBALL.fixture_goals GROUP BY scorer_player_id"
+    ).fetchall())
+
+    assists_by_pid = dict(conn.execute(
+        "SELECT assister_player_id, COUNT(*) FROM FOOTBALL.fixture_goals "
+        "WHERE assister_player_id IS NOT NULL GROUP BY assister_player_id"
+    ).fetchall())
+
+    yellows_by_pid: dict = {}
+    reds_by_pid: dict = {}
+    for pid, y, r in conn.execute(
+        "SELECT player_id, COALESCE(SUM(yellow_count), 0), COALESCE(SUM(red_count), 0) "
+        "FROM FOOTBALL.matchday_cards GROUP BY player_id"
+    ).fetchall():
+        yellows_by_pid[pid] = y
+        reds_by_pid[pid] = r
+
+    attendance: dict = defaultdict(set)
+    for pid, mid in conn.execute(
+        "SELECT player_id, matchday_id FROM FOOTBALL.matchday_attendance WHERE present = true"
+    ).fetchall():
+        attendance[pid].add(mid)
+
+    motm: dict = defaultdict(list)
+    for pid, mid, date in conn.execute(
+        "SELECT mm.player_id, mm.matchday_id, m.sunday_date "
+        "FROM FOOTBALL.matchday_motm mm JOIN FOOTBALL.matchdays m ON m.id = mm.matchday_id"
+    ).fetchall():
+        motm[pid].append({"matchday_id": mid, "sunday_date": str(date)[:10]})
+
+    memberships: dict = defaultdict(list)
+    for pid, mid, gid, date, ended in conn.execute("""
+        SELECT mgm.player_id, mgm.matchday_id, mgm.group_id, m.sunday_date,
+               COALESCE(m.matchday_ended, false)
+        FROM FOOTBALL.matchday_group_members mgm
+        JOIN FOOTBALL.matchdays m ON m.id = mgm.matchday_id
+    """).fetchall():
+        memberships[pid].append((mid, gid, str(date)[:10], bool(ended)))
+
+    goals_in_md: dict = defaultdict(int)
+    for mid, pid, cnt in conn.execute("""
+        SELECT mf.matchday_id, fg.scorer_player_id, COUNT(*)
+        FROM FOOTBALL.fixture_goals fg
+        JOIN FOOTBALL.matchday_fixtures mf ON mf.id = fg.fixture_id
+        GROUP BY mf.matchday_id, fg.scorer_player_id
+    """).fetchall():
+        goals_in_md[(mid, pid)] = cnt
+
+    assists_in_md: dict = defaultdict(int)
+    for mid, pid, cnt in conn.execute("""
+        SELECT mf.matchday_id, fg.assister_player_id, COUNT(*)
+        FROM FOOTBALL.fixture_goals fg
+        JOIN FOOTBALL.matchday_fixtures mf ON mf.id = fg.fixture_id
+        WHERE fg.assister_player_id IS NOT NULL
+        GROUP BY mf.matchday_id, fg.assister_player_id
+    """).fetchall():
+        assists_in_md[(mid, pid)] = cnt
+
+    # Build league table positions from completed fixture results
+    group_pts: dict = {}
+    for mid, a_id, b_id, hg, ag in conn.execute(
+        "SELECT matchday_id, group_a_id, group_b_id, home_goals, away_goals "
+        "FROM FOOTBALL.matchday_fixtures WHERE status = 'completed'"
+    ).fetchall():
+        if hg > ag:
+            pa, pb = 3, 0
+        elif hg == ag:
+            pa = pb = 1
+        else:
+            pa, pb = 0, 3
+        for gid, gf, conc, pts in ((a_id, hg, ag, pa), (b_id, ag, hg, pb)):
+            key = (mid, gid)
+            if key not in group_pts:
+                group_pts[key] = [0, 0, 0]
+            group_pts[key][0] += pts
+            group_pts[key][1] += gf
+            group_pts[key][2] += gf - conc
+
+    league_pos: dict = {}
+    by_md: dict = defaultdict(list)
+    for (mid, gid), s in group_pts.items():
+        by_md[mid].append((gid, s))
+    for mid, groups in by_md.items():
+        for pos, (gid, _) in enumerate(
+            sorted(groups, key=lambda x: (-x[1][0], -x[1][2], -x[1][1])), 1
+        ):
+            league_pos[(mid, gid)] = pos
+
+    cs: dict = defaultdict(int)
+    for mid, gid, cnt in conn.execute("""
+        SELECT matchday_id, group_id, COUNT(*) FROM (
+            SELECT f.matchday_id, f.group_a_id AS group_id, f.away_goals AS conceded
+            FROM FOOTBALL.matchday_fixtures f WHERE f.status = 'completed'
+            UNION ALL
+            SELECT f.matchday_id, f.group_b_id AS group_id, f.home_goals AS conceded
+            FROM FOOTBALL.matchday_fixtures f WHERE f.status = 'completed'
+        ) sub WHERE conceded = 0
+        GROUP BY matchday_id, group_id
+    """).fetchall():
+        cs[(mid, gid)] = cnt
+
+    md_cards: dict = {}
+    for mid, pid, y, r in conn.execute(
+        "SELECT matchday_id, player_id, yellow_count, red_count FROM FOOTBALL.matchday_cards"
+    ).fetchall():
+        md_cards[(mid, pid)] = (y, r)
+
+    completed_mds = {
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT matchday_id FROM FOOTBALL.matchday_fixtures WHERE status = 'completed'"
+        ).fetchall()
+    }
+
+    out = []
+    for pid, baller, jersey in player_rows:
+        md_list = memberships[pid]
+        present_mids = attendance[pid]
+        matchdays_present = sum(1 for (mid, _, _, _) in md_list if mid in present_mids)
+        career_cs = sum(cs.get((mid, gid), 0) for (mid, gid, _, ended) in md_list if ended)
+
+        rating_list = []
+        for mid, gid, sunday_date, ended in md_list:
+            if not ended or mid not in present_mids:
+                continue
+            if mid not in completed_mds:
+                rating_list.append({"matchday_id": mid, "sunday_date": sunday_date, "rating": 5.0})
+                continue
+            rating = 5.0
+            g = goals_in_md.get((mid, pid), 0)
+            a = assists_in_md.get((mid, pid), 0)
+            rating += g * 2
+            if g >= 3:
+                rating += 5
+            rating += a
+            pos = league_pos.get((mid, gid))
+            if pos == 1: rating += 5
+            elif pos == 2: rating += 3
+            elif pos == 3: rating += 2
+            elif pos == 4: rating += 1
+            rating += cs.get((mid, gid), 0)
+            cards = md_cards.get((mid, pid))
+            if cards:
+                rating -= cards[0] * 5 + cards[1] * 10
+            rating = round(rating, 2)
+            if rating != 0:
+                rating_list.append({"matchday_id": mid, "sunday_date": sunday_date, "rating": rating})
+
+        avg = round(sum(r["rating"] for r in rating_list) / total_ended, 2) if rating_list else 0.0
+        out.append({
             "player_id": pid, "baller_name": baller, "jersey_number": jersey or 0,
-            "goals": s["goals"], "assists": s["assists"],
-            "yellow_cards": s["yellow_cards"], "red_cards": s["red_cards"],
-            "clean_sheets": s["clean_sheets"], "matchdays_present": s["matchdays_present"],
-            "average_rating": s["average_rating"], "motm_count": s.get("motm_count", 0),
+            "goals": goals_by_pid.get(pid, 0),
+            "assists": assists_by_pid.get(pid, 0),
+            "yellow_cards": yellows_by_pid.get(pid, 0),
+            "red_cards": reds_by_pid.get(pid, 0),
+            "clean_sheets": career_cs,
+            "matchdays_present": matchdays_present,
+            "average_rating": avg,
+            "motm_count": len(motm[pid]),
         })
+    return out
+
+
+def _build_leaderboard_result(conn) -> dict:
+    """Run bulk stats for all approved players, sort, add stars, build top-X lists. Caches the result."""
+    player_rows = conn.execute(
+        "SELECT id, baller_name, jersey_number FROM FOOTBALL.players "
+        "WHERE status = 'approved' AND id > 0 ORDER BY baller_name"
+    ).fetchall()
+    lb_out = _bulk_leaderboard_stats(conn, player_rows)
     lb_out.sort(key=lambda x: (-x["average_rating"], -x["goals"], -x["assists"]))
     rated = [(r["player_id"], r["average_rating"]) for r in lb_out if r["average_rating"] > 0]
     n = len(rated)
@@ -2269,28 +2407,63 @@ def member_my_stats(payload: dict = Depends(require_player)):
     top_assists = sorted(lb_out, key=lambda x: (-x["assists"], -x["goals"], -x["average_rating"]))[:5]
     top_present = sorted(lb_out, key=lambda x: (-x["matchdays_present"], -x["average_rating"]))[:5]
     top_clean_sheets = sorted(lb_out, key=lambda x: (-x["clean_sheets"], -x["average_rating"]))[:5]
-    top_motm = sorted([r for r in lb_out if r.get("motm_count", 0) > 0], key=lambda x: (-x["motm_count"], -x["average_rating"]))[:5]
-    _sc_set("leaderboard", {
+    top_motm = sorted(
+        [r for r in lb_out if r.get("motm_count", 0) > 0],
+        key=lambda x: (-x["motm_count"], -x["average_rating"])
+    )[:5]
+    result = {
         "success": True, "leaderboard": lb_out,
         "top_goals": top_goals, "top_assists": top_assists,
         "top_present": top_present, "top_clean_sheets": top_clean_sheets,
         "top_motm": top_motm,
-    })
+    }
+    _sc_set("leaderboard", result)
     _sc_set("top_three", {"success": True, "top_three": [
         {k: r[k] for k in ("player_id", "baller_name", "jersey_number", "average_rating", "goals", "assists", "matchdays_present")}
         for r in lb_out if r["average_rating"] > 0
     ][:3]})
+    return result
+
+
+@router.get("/member/stats")
+def member_my_stats(payload: dict = Depends(require_player)):
+    """Current member's career stats. Fast-path reuses leaderboard cache; slow-path runs bulk computation."""
+    player_id = int(payload["sub"])
+    cache_key = f"stats:{player_id}"
+    cached = _sc_get(cache_key)
+    if cached is not None:
+        return JSONResponse(content=cached, headers=NO_CACHE_HEADERS)
+    conn = get_conn()
+
+    # Fast path: leaderboard already cached — compute only this player's individual stats
+    lb = _sc_get("leaderboard")
+    if lb is not None:
+        stats = _player_career_stats(conn, player_id)
+        rank, star_rating = None, 0
+        for i, row in enumerate(lb["leaderboard"], 1):
+            if row["player_id"] == player_id:
+                rank = i
+                star_rating = row.get("star_rating", 0)
+                break
+        _ensure_avatar_columns(conn)
+        av_row = conn.execute("SELECT avatar_url FROM FOOTBALL.players WHERE id = ?", [player_id]).fetchone()
+        result = {"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating,
+                  "avatar_url": (av_row[0] if av_row else None) or ""}
+        _sc_set(cache_key, result)
+        return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
+
+    # Slow path: bulk-compute all players (fast), cache leaderboard as a bonus, then get this player's details
+    lb_result = _build_leaderboard_result(conn)
     rank, star_rating = None, 0
-    for i, row in enumerate(lb_out, 1):
+    for i, row in enumerate(lb_result["leaderboard"], 1):
         if row["player_id"] == player_id:
             rank = i
-            star_rating = stars.get(player_id, 0)
+            star_rating = row.get("star_rating", 0)
             break
-    if my_stats is None:
-        my_stats = _player_career_stats(conn, player_id, cache)
+    stats = _player_career_stats(conn, player_id)
     _ensure_avatar_columns(conn)
     av_row = conn.execute("SELECT avatar_url FROM FOOTBALL.players WHERE id = ?", [player_id]).fetchone()
-    result = {"success": True, "stats": my_stats, "global_rank": rank, "star_rating": star_rating,
+    result = {"success": True, "stats": stats, "global_rank": rank, "star_rating": star_rating,
               "avatar_url": (av_row[0] if av_row else None) or ""}
     _sc_set(cache_key, result)
     return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
@@ -2302,46 +2475,7 @@ def member_leaderboard(payload: dict = Depends(require_player)):
     cached = _sc_get("leaderboard")
     if cached is not None:
         return JSONResponse(content=cached, headers=NO_CACHE_HEADERS)
-    conn = get_conn()
-    cache = {}
-    all_players = conn.execute("SELECT id, baller_name, jersey_number FROM FOOTBALL.players WHERE status = 'approved' AND id > 0 ORDER BY baller_name").fetchall()
-    out = []
-    for pid, baller, jersey in all_players:
-        s = _player_career_stats(conn, pid, cache)
-        out.append({
-            "player_id": pid, "baller_name": baller, "jersey_number": jersey or 0,
-            "goals": s["goals"], "assists": s["assists"],
-            "yellow_cards": s["yellow_cards"], "red_cards": s["red_cards"],
-            "clean_sheets": s["clean_sheets"], "matchdays_present": s["matchdays_present"],
-            "average_rating": s["average_rating"], "motm_count": s.get("motm_count", 0),
-        })
-    out.sort(key=lambda x: (-x["average_rating"], -x["goals"], -x["assists"]))
-    # Compute stars from this list (quartiles by average_rating) so we don't call _star_rating_by_quartile again
-    rated = [(r["player_id"], r["average_rating"]) for r in out if r["average_rating"] > 0]
-    n = len(rated)
-    stars = {r["player_id"]: 0 for r in out}
-    for i, (pid, _) in enumerate(rated):
-        if i < n // 4:
-            stars[pid] = 5
-        elif i < n // 2:
-            stars[pid] = 4
-        elif i < (3 * n) // 4:
-            stars[pid] = 3
-        else:
-            stars[pid] = 1
-    for row in out:
-        row["star_rating"] = stars.get(row["player_id"], 0)
-    top_goals = sorted(out, key=lambda x: (-x["goals"], -x["assists"], -x["average_rating"]))[:5]
-    top_assists = sorted(out, key=lambda x: (-x["assists"], -x["goals"], -x["average_rating"]))[:5]
-    top_present = sorted(out, key=lambda x: (-x["matchdays_present"], -x["average_rating"]))[:5]
-    top_clean_sheets = sorted(out, key=lambda x: (-x["clean_sheets"], -x["average_rating"]))[:5]
-    top_motm = sorted([r for r in out if r.get("motm_count", 0) > 0], key=lambda x: (-x["motm_count"], -x["average_rating"]))[:5]
-    result = {
-        "success": True, "leaderboard": out,
-        "top_goals": top_goals, "top_assists": top_assists, "top_present": top_present,
-        "top_clean_sheets": top_clean_sheets, "top_motm": top_motm,
-    }
-    _sc_set("leaderboard", result)
+    result = _build_leaderboard_result(get_conn())
     return JSONResponse(content=result, headers=NO_CACHE_HEADERS)
 
 
