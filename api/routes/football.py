@@ -1900,12 +1900,10 @@ def admin_matchday_add_group(matchday_id: int, payload: dict = Depends(require_a
     md = _get_matchday_by_id(conn, matchday_id)
     if not md:
         raise HTTPException(status_code=404, detail="Matchday not found.")
-    if md["status"] != "approved":
-        raise HTTPException(status_code=400, detail="Matchday must be approved.")
-    if md.get("groups_published"):
-        raise HTTPException(status_code=400, detail="Unpublish groups first before adding a new group.")
     if md.get("matchday_ended"):
         raise HTTPException(status_code=400, detail="Cannot add a group after matchday has ended.")
+    if md.get("groups_published"):
+        raise HTTPException(status_code=400, detail="Unpublish groups first before adding a new group.")
     max_idx = conn.execute(
         "SELECT COALESCE(MAX(group_index), 0) FROM FOOTBALL.matchday_groups WHERE matchday_id = ?",
         [matchday_id]
