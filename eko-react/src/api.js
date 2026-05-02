@@ -322,6 +322,11 @@ export async function regenerateMatchdayGroups(matchdayId, token) {
   return res.data;
 }
 
+export async function addMatchdayGroup(matchdayId, token) {
+  const res = await footballApi.post(`/admin/matchdays/${matchdayId}/groups/add`, null, { headers: { Authorization: `Bearer ${token}` } });
+  return res.data;
+}
+
 export async function publishMatchdayGroups(matchdayId, token) {
   const res = await footballApi.post(`/admin/matchdays/${matchdayId}/groups/publish`, null, { headers: { Authorization: `Bearer ${token}` } });
   return res.data;

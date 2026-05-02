@@ -1893,6 +1893,32 @@ def admin_matchday_unpublish_groups(matchday_id: int, payload: dict = Depends(re
     return {"success": True, "message": "Groups unpublished. You can edit and publish again."}
 
 
+@router.post("/admin/matchdays/{matchday_id:int}/groups/add")
+def admin_matchday_add_group(matchday_id: int, payload: dict = Depends(require_admin)):
+    """Add a new empty group to this matchday. Groups must be unpublished first."""
+    conn = get_conn()
+    md = _get_matchday_by_id(conn, matchday_id)
+    if not md:
+        raise HTTPException(status_code=404, detail="Matchday not found.")
+    if md["status"] != "approved":
+        raise HTTPException(status_code=400, detail="Matchday must be approved.")
+    if md.get("groups_published"):
+        raise HTTPException(status_code=400, detail="Unpublish groups first before adding a new group.")
+    if md.get("matchday_ended"):
+        raise HTTPException(status_code=400, detail="Cannot add a group after matchday has ended.")
+    max_idx = conn.execute(
+        "SELECT COALESCE(MAX(group_index), 0) FROM FOOTBALL.matchday_groups WHERE matchday_id = ?",
+        [matchday_id]
+    ).fetchone()[0]
+    new_idx = max_idx + 1
+    next_gid = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM FOOTBALL.matchday_groups").fetchone()[0]
+    conn.execute(
+        "INSERT INTO FOOTBALL.matchday_groups (id, matchday_id, group_index) VALUES (?, ?, ?)",
+        [next_gid, matchday_id, new_idx],
+    )
+    return {"success": True, "group_id": next_gid, "group_index": new_idx, "message": f"Group {new_idx} created. Move players in, then publish."}
+
+
 @router.get("/admin/matchdays/{matchday_id:int}/attendance")
 def admin_matchday_attendance(matchday_id: int, payload: dict = Depends(require_admin)):
     """List all group members for this matchday with present/absent. Used to mark who showed up."""

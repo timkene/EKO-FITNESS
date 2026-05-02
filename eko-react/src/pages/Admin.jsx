@@ -38,6 +38,7 @@ import {
   moveMatchdayMemberBatch,
   unpublishMatchdayGroups,
   regenerateMatchdayGroups,
+  addMatchdayGroup,
   publishMatchdayGroups,
   generateFixtures,
   getFixtures,
@@ -1170,6 +1171,7 @@ export default function Admin() {
                         </div>
                         {pendingMoves.length > 0 && <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg mr-2" onClick={handleApplyBatchMoves}>Apply all moves ({pendingMoves.length})</button>}
                         <button type="button" className="py-2 px-4 bg-slate-600 text-slate-200 font-semibold rounded-lg hover:bg-slate-500 mr-2" onClick={async () => { showToast(''); try { await regenerateMatchdayGroups(selectedMatchdayId, getAdminToken()); showToast('Groups regenerated from voters only (5+Others per group).'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Regenerate groups (voters only, 5+Others)</button>
+                        <button type="button" className="py-2 px-4 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-500 mr-2" onClick={async () => { showToast(''); try { await addMatchdayGroup(selectedMatchdayId, getAdminToken()); showToast('New group added. Move players in, then publish.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>+ Add group</button>
                         <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg hover:opacity-90" onClick={handlePublishGroups}>Publish groups</button>
                       </>
                     )}
