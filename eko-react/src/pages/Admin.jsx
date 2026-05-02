@@ -39,6 +39,7 @@ import {
   unpublishMatchdayGroups,
   regenerateMatchdayGroups,
   addMatchdayGroup,
+  deleteMatchdayGroup,
   publishMatchdayGroups,
   generateFixtures,
   getFixtures,
@@ -1146,11 +1147,20 @@ export default function Admin() {
                       <>
                         <h4 className="font-bold mb-2">Groups (queue moves then Apply all)</h4>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                          {matchdayGroups.groups.map((g) => (
+                          {matchdayGroups.groups.map((g) => {
+                            const realMembers = g.members.filter((m) => !m.is_others);
+                            const isEmpty = realMembers.length === 0;
+                            return (
                             <div key={g.group_id} className="rounded-lg bg-slate-800/50 border border-slate-700 p-4">
-                              <strong className="text-primary">Group {g.group_index}</strong>
-                              <ul className="mt-2 space-y-2">
+                              <div className="flex items-center justify-between mb-2">
+                                <strong className="text-primary">Group {g.group_index}</strong>
+                                {isEmpty && (
+                                  <button type="button" className="text-xs text-red-400 hover:text-red-300 border border-red-500/30 rounded px-2 py-0.5" onClick={async () => { if (!window.confirm(`Delete Group ${g.group_index}?`)) return; try { await deleteMatchdayGroup(selectedMatchdayId, g.group_id, getAdminToken()); showToast('Group deleted.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Delete group</button>
+                                )}
+                              </div>
+                              <ul className="mt-1 space-y-2">
                                 {g.members.map((m) => {
+                                  if (m.is_others) return <li key={m.player_id} className="text-sm text-slate-500 italic">Others (default slot)</li>;
                                   const pending = pendingMoves.find((pm) => pm.player_id === m.player_id);
                                   return (
                                     <li key={m.player_id} className="flex items-center justify-between gap-2 text-sm">
@@ -1167,7 +1177,8 @@ export default function Admin() {
                                 })}
                               </ul>
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                         {pendingMoves.length > 0 && <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg mr-2" onClick={handleApplyBatchMoves}>Apply all moves ({pendingMoves.length})</button>}
                         <button type="button" className="py-2 px-4 bg-slate-600 text-slate-200 font-semibold rounded-lg hover:bg-slate-500 mr-2" onClick={async () => { showToast(''); try { await regenerateMatchdayGroups(selectedMatchdayId, getAdminToken()); showToast('Groups regenerated from voters only (5+Others per group).'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Regenerate groups (voters only, 5+Others)</button>

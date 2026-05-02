@@ -1827,10 +1827,12 @@ def admin_matchday_groups(matchday_id: int, payload: dict = Depends(require_admi
         if pid is not None:
             groups_dict[gid]["members"].append({"player_id": pid, "baller_name": baller, "first_name": first, "surname": last, "jersey_number": jersey})
     # Others is in every group (5 voted + 1 Others = max 6 per group). Append for display.
-    others_id = _others_id(matchday_id)
+    # Use a unique others_id per group so React keys don't collide across groups.
     for g in groups_dict.values():
+        others_id = -(matchday_id * OTHERS_GROUP_MULT + g["group_id"])
         g["members"].append({"player_id": others_id, "baller_name": "Others", "first_name": "—", "surname": "", "jersey_number": None, "is_others": True})
-    return {"success": True, "matchday": md, "groups": list(groups_dict.values())}
+    sorted_groups = sorted(groups_dict.values(), key=lambda g: g["group_index"])
+    return {"success": True, "matchday": md, "groups": sorted_groups}
 
 
 class MoveMemberBody(BaseModel):
@@ -1916,6 +1918,33 @@ def admin_matchday_add_group(matchday_id: int, payload: dict = Depends(require_a
         [next_gid, matchday_id, new_idx],
     )
     return {"success": True, "group_id": next_gid, "group_index": new_idx, "message": f"Group {new_idx} created. Move players in, then publish."}
+
+
+@router.delete("/admin/matchdays/{matchday_id:int}/groups/{group_id:int}")
+def admin_matchday_delete_group(matchday_id: int, group_id: int, payload: dict = Depends(require_admin)):
+    """Delete an empty group (must contain no real players — only the default Others slot)."""
+    conn = get_conn()
+    md = _get_matchday_by_id(conn, matchday_id)
+    if not md:
+        raise HTTPException(status_code=404, detail="Matchday not found.")
+    if md.get("matchday_ended"):
+        raise HTTPException(status_code=400, detail="Cannot delete a group after matchday has ended.")
+    if md.get("groups_published"):
+        raise HTTPException(status_code=400, detail="Unpublish groups first before deleting a group.")
+    group_row = conn.execute(
+        "SELECT id FROM FOOTBALL.matchday_groups WHERE id = ? AND matchday_id = ?",
+        [group_id, matchday_id]
+    ).fetchone()
+    if not group_row:
+        raise HTTPException(status_code=404, detail="Group not found.")
+    member_count = conn.execute(
+        "SELECT COUNT(*) FROM FOOTBALL.matchday_group_members WHERE group_id = ? AND matchday_id = ?",
+        [group_id, matchday_id]
+    ).fetchone()[0]
+    if member_count > 0:
+        raise HTTPException(status_code=400, detail="Group still has players. Move them to another group first.")
+    conn.execute("DELETE FROM FOOTBALL.matchday_groups WHERE id = ? AND matchday_id = ?", [group_id, matchday_id])
+    return {"success": True, "message": "Group deleted."}
 
 
 @router.get("/admin/matchdays/{matchday_id:int}/attendance")
