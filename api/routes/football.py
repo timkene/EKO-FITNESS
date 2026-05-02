@@ -882,6 +882,13 @@ def member_apply_waiver(body: WaiverApplyBody, payload: dict = Depends(require_p
     return {"success": True, "approved": True, "message": f"Waiver approved. You can vote now. Please pay your dues by {due_date}."}
 
 
+@router.post("/admin/clear-cache")
+def admin_clear_cache(payload: dict = Depends(require_admin)):
+    """Clear the in-memory leaderboard/stats cache so fresh data is served immediately."""
+    _sc_clear()
+    return {"success": True, "message": "Cache cleared."}
+
+
 @router.get("/admin/waiver-pending")
 def admin_waiver_pending(payload: dict = Depends(require_admin)):
     """List all players with a pending waiver request this quarter."""
