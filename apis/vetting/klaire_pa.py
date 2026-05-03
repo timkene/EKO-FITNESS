@@ -1309,56 +1309,64 @@ Respond in JSON only (no markdown):
 # ── Procedure Combination Necessity Check (request-level) ────────────────────
 
 def check_procedure_combination(
-    procedures: List[Dict],   # [{"code": str, "name": str, "diagnoses": [{"code","name"}]}]
+    procedures: List[Dict],   # [{"code", "name", "diagnoses", "from_basket"(optional bool)}]
     encounter_type: str = "OUTPATIENT",
 ) -> Dict:
     """
-    Given all procedures in the PA request (after individual rule checks), evaluate
-    whether the COMBINATION is medically necessary — i.e. no redundant treatments,
-    no duplicate drug classes, no tests that add nothing given what else is prescribed.
+    Evaluate whether the combination of procedures is medically necessary.
 
-    Classic flags:
-    - Two antibiotics for the same infection (unless dual-therapy is protocol)
-    - Two antipyretics / two NSAIDs
-    - A diagnostic test that is unnecessary given another test already covers it
-    - Two drugs in the same pharmacological class treating the same condition
-
-    Never learns. Always AI. Always requires agent review if flagged.
+    procedures may include items with from_basket=True — these are already
+    approved this session and cannot be denied; they provide context only.
+    Only procedures without from_basket (or from_basket=False) can be denied.
 
     Returns:
         necessary: bool
         confidence: int
         reasoning: str
         flagged_items: list of {code_a, code_b, reason}
+        procedures_to_deny: list of codes (current-request only)
         requires_review: bool
     """
-    if len(procedures) < 2:
+    current = [p for p in procedures if not p.get("from_basket")]
+    basket  = [p for p in procedures if p.get("from_basket")]
+
+    # Need at least 2 total (current + basket) to check combinations
+    if len(current) + len(basket) < 2:
         return {"necessary": True, "confidence": 100,
                 "reasoning": "Only one procedure — no combination to assess.",
-                "flagged_items": [], "requires_review": False}
+                "flagged_items": [], "requires_review": False,
+                "procedures_to_deny": [], "procedure_verdicts": {}}
 
-    proc_lines = []
-    for p in procedures:
-        diag_str = ", ".join(f"{d['code']} ({d['name']})" for d in p.get("diagnoses", []))
-        proc_lines.append(f"- {p['code']}: {p['name']}" + (f"  [for: {diag_str}]" if diag_str else ""))
-    proc_list = "\n".join(proc_lines)
     context = "INPATIENT admission" if encounter_type == "INPATIENT" else "outpatient visit"
+
+    def _fmt(p: Dict) -> str:
+        diag_str = ", ".join(f"{d['code']} ({d['name']})" for d in p.get("diagnoses", []))
+        return f"- {p['code']}: {p['name']}" + (f"  [for: {diag_str}]" if diag_str else "")
+
+    current_lines = "\n".join(_fmt(p) for p in current)
+    basket_section = ""
+    if basket:
+        basket_lines = "\n".join(_fmt(p) for p in basket)
+        basket_section = (
+            f"\nALREADY APPROVED THIS SESSION (do NOT deny these — context only):\n{basket_lines}\n"
+        )
 
     prompt = f"""You are a senior HMO medical reviewer in Nigeria ({context}).
 
-The following procedures/medications have been requested together in a single PA for one patient:
+A provider has submitted a PA request. Below are the NEWLY REQUESTED procedures, plus any procedures already approved earlier in the same session.
 
-{proc_list}
-
-Your task: assess whether the COMBINATION of these procedures is collectively medically necessary, or whether any items are redundant, duplicative, or unjustified given what else is already being prescribed.
+NEWLY REQUESTED (you may recommend denying these if redundant):
+{current_lines}
+{basket_section}
+Your task: assess whether the combination of all procedures (new + already approved) is collectively medically necessary, or whether any NEWLY REQUESTED item is redundant, duplicative, or unjustified given what is already approved.
 
 STRICT RULES:
-- NECESSARY: all items serve distinct clinical purposes and are each justified.
-- NOT NECESSARY: flag if two items treat the same condition via the same mechanism (e.g. two antibiotics covering the same spectrum for the same infection without a dual-therapy indication; two antipyretics; two NSAIDs; two antihypertensives of the same class for an outpatient).
-- NOT NECESSARY: flag a diagnostic test that is clinically redundant given another test already requested.
-- Do NOT flag items that treat genuinely different conditions or that are standard combination therapy (e.g. ACT + paracetamol for malaria, HAART combinations, dual antihypertensives for resistant hypertension).
-- When in doubt, mark NECESSARY — only flag CLEAR redundancy or unjustified duplication.
+- NECESSARY: all new items serve distinct clinical purposes not already covered.
+- NOT NECESSARY: flag a new item if it treats the same condition via the same mechanism as an already-approved item (e.g. amoxicillin when cefuroxime is already approved for the same infection; two antipyretics; two NSAIDs; two same-class antibiotics without documented dual-therapy indication).
+- NOT NECESSARY: flag a diagnostic test that is clinically redundant given another already ordered.
+- Do NOT flag items for genuinely different conditions or standard combination therapy (ACT + paracetamol for malaria, HAART combos, dual antihypertensives for resistant hypertension).
 - Be strict with antibiotics: two broad-spectrum antibiotics for a simple outpatient infection are almost never justified unless there is a documented synergy or resistant-organism protocol.
+- When in doubt, mark NECESSARY — only flag CLEAR redundancy or unjustified duplication.
 
 Respond in JSON only (no markdown). No text before or after the JSON object:
 {{
@@ -1374,18 +1382,18 @@ Respond in JSON only (no markdown). No text before or after the JSON object:
       "name_a": "procedure name",
       "code_b": "procedure code",
       "name_b": "procedure name",
-      "reason": "why this pair is redundant or unjustified together"
+      "reason": "why this new item is redundant given what is already approved"
     }}
   ]
 }}
 
 RULES for procedure_verdicts:
-- Include EVERY procedure code listed above as a key.
-- Value must be exactly "keep" or "deny".
-- A procedure that is clinically justified and should be approved = "keep".
-- A procedure that is redundant, unjustified, or unnecessary given what else is prescribed = "deny".
+- Include EVERY procedure code (new and already-approved) as a key.
+- Already-approved procedures must ALWAYS be "keep".
+- A newly requested procedure that is redundant or unjustified = "deny".
+- A newly requested procedure that is clinically necessary = "keep".
 - If necessary=true, all verdicts must be "keep".
-- Be consistent: if you say a procedure is appropriate in your reasoning, mark it "keep"."""
+- Be consistent: if you flag a new item as redundant, mark it "deny"."""
 
     ai = _call_claude(prompt)
     necessary  = bool(ai.get("necessary", True))
@@ -1394,10 +1402,11 @@ RULES for procedure_verdicts:
     flagged    = ai.get("flagged_items", [])
     verdicts   = ai.get("procedure_verdicts", {})
 
-    # Derive procedures_to_deny from per-procedure verdicts
+    # Only deny current-request procedures — never basket items
+    basket_codes = {p["code"].upper() for p in basket}
     procedures_to_deny = [
         code.upper() for code, verdict in verdicts.items()
-        if str(verdict).lower() == "deny"
+        if str(verdict).lower() == "deny" and code.upper() not in basket_codes
     ]
 
     return {
@@ -1519,7 +1528,8 @@ def validate_pa_request(
                     r.setdefault("review_reasons", []).append(pd_check["reason"])
 
     # ── Procedure Combination Necessity Check (request-level) ─────────────────
-    # Build procedure list with their approved diagnoses for the AI to reason over
+    # Build procedure list: current request items + session basket (already approved).
+    # Basket items are marked from_basket=True — they provide context but cannot be denied.
     proc_combo_input: List[Dict] = []
     seen_proc_codes: set = set()
     for item, res in zip(items, results):
@@ -1527,16 +1537,35 @@ def validate_pa_request(
         if pc in seen_proc_codes:
             continue
         seen_proc_codes.add(pc)
-        # Use all submitted diagnosis codes (not just approved) so combo AI has full context
         diag_names_map = item.get("diagnosis_names", {})
         all_diag_codes = item.get("diagnosis_codes", [])
         proc_combo_input.append({
             "code": pc,
             "name": res.get("procedure_name", pc),
             "individual_decision": res.get("decision", "APPROVE"),
+            "from_basket": False,
             "diagnoses": [
                 {"code": dc, "name": diag_names_map.get(dc, dc)}
                 for dc in all_diag_codes
+            ],
+        })
+
+    # Append basket items (approved earlier this session) as context
+    for bitem in (session_basket or []):
+        bpc = (bitem.get("procedure_code") or "").strip().upper()
+        if not bpc or bpc in seen_proc_codes:
+            continue
+        seen_proc_codes.add(bpc)
+        bdiag_codes = bitem.get("diagnosis_codes", [])
+        bdiag_names = bitem.get("diagnosis_names", {})
+        proc_combo_input.append({
+            "code": bpc,
+            "name": bitem.get("procedure_name", bpc),
+            "individual_decision": "APPROVE",
+            "from_basket": True,
+            "diagnoses": [
+                {"code": dc, "name": bdiag_names.get(dc, dc)}
+                for dc in bdiag_codes
             ],
         })
 
