@@ -1623,14 +1623,20 @@ def klaire_submit_review(review_id: str, action: KlaireReviewAction):
         raise HTTPException(status_code=409, detail=f"Review {review_id} is already {doc['status']}")
 
     now = datetime.now().isoformat()
-    # For PA items (PA_OUTPATIENT/PA_PREAUTH), ai_recommendation is stored as "PENDING_REVIEW"
-    # — the actual AI decision lives in first_line.decision (APPROVE or DENY).
-    # For specialist/admission reviews, ai_recommendation holds the real value.
+    # Derive the true AI recommendation for AGREE/OVERRIDE flip logic.
+    # For combo-flagged PA items: ai_recommendation is explicitly "DENY" — use it.
+    # For normal PA items: ai_recommendation is "PENDING_REVIEW" — use first_line.decision.
+    # For specialist/admission reviews: ai_recommendation holds the real value.
     review_type_early = doc.get("review_type", "SPECIALIST")
+    stored_ai_rec = doc.get("ai_recommendation", "")
     if review_type_early in ("PA_OUTPATIENT", "PA_PREAUTH"):
-        ai_rec = (doc.get("first_line") or {}).get("decision", "APPROVE")
+        if stored_ai_rec == "DENY":
+            # Combo/clinical flag explicitly set this to DENY
+            ai_rec = "DENY"
+        else:
+            ai_rec = (doc.get("first_line") or {}).get("decision", "APPROVE")
     else:
-        ai_rec = doc.get("ai_recommendation", "APPROVE")
+        ai_rec = stored_ai_rec if stored_ai_rec not in ("", "PENDING_REVIEW") else "APPROVE"
 
     if action.action == "AGREE":
         # Agent agrees with whatever AI decided

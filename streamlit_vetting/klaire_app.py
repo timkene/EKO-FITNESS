@@ -1562,11 +1562,15 @@ elif "Agent Review" in mode:
                         enrollee   = rv.get("enrollee_id") or "—"
                         enc_date   = rv.get("encounter_date", "")
 
-                        # Derive overall AI recommendation from first-line result
-                        # (first-line is the primary AI signal; DENY first-line = AI says deny)
-                        fl_decision  = fl.get("decision", "APPROVE") if fl else "APPROVE"
-                        ai_rec       = fl_decision  # APPROVE or DENY
-                        ai_conf      = fl.get("confidence", 0) if fl else 0
+                        # Derive overall AI recommendation.
+                        # combo_flag_reason / ai_recommendation=="DENY" means a
+                        # combination check overrode the individual first_line result.
+                        fl_decision      = fl.get("decision", "APPROVE") if fl else "APPROVE"
+                        combo_flag_reason = rv.get("combo_flag_reason", "")
+                        stored_ai_rec    = rv.get("ai_recommendation", "")
+                        # Overall = DENY when stored_ai_rec is explicitly DENY (combo/clinical flag)
+                        ai_rec  = "DENY" if (stored_ai_rec == "DENY" or combo_flag_reason) else fl_decision
+                        ai_conf = fl.get("confidence", 0) if fl else 0
 
                         # Badge row
                         badge_html = (
@@ -1586,13 +1590,21 @@ elif "Agent Review" in mode:
 
                         # ── Explicit AI recommendation box ─────────────────
                         if ai_rec == "DENY":
+                            # Primary deny reason: combo flag overrides first_line
+                            deny_reason = combo_flag_reason or fl.get("reasoning", "")
                             st.markdown(
                                 f'<div style="background:#2d0a0a;border:1px solid #dc2626;'
                                 f'border-radius:8px;padding:10px 16px;margin:8px 0;">'
                                 f'<strong style="color:#f87171;font-size:1em;">🤖 AI Recommendation: DENY</strong>'
-                                f'<span style="color:#fca5a5;font-size:0.85em;margin-left:8px;">({ai_conf}% confidence)</span><br>'
-                                f'<span style="color:#fecaca;font-size:0.88em;">{fl.get("reasoning","")}</span>'
-                                f'</div>',
+                                + (f'<span style="color:#fca5a5;font-size:0.85em;margin-left:8px;">({ai_conf}% confidence)</span>' if not combo_flag_reason else '')
+                                + f'<br><span style="color:#fecaca;font-size:0.88em;">{deny_reason}</span>'
+                                + (
+                                    f'<br><span style="color:#9ca3af;font-size:0.8em;margin-top:4px;display:block;">'
+                                    f'ℹ️ Individual check: {fl_decision} ({ai_conf}%) — {fl.get("reasoning","")}'
+                                    f'</span>'
+                                    if combo_flag_reason and fl_decision == "APPROVE" else ""
+                                )
+                                + f'</div>',
                                 unsafe_allow_html=True,
                             )
                         else:
