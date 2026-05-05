@@ -28,3 +28,8 @@ passlib[bcrypt]>=1.7.4
 # ── TOML ─────────────────────────────────────────────────────────────────────
 # tomllib is built-in for Python >= 3.11; tomli is the backport for 3.10 and below
 tomli>=2.0.0; python_version < "3.11"
+
+# ── Klaire WhatsApp ───────────────────────────────────────────────────────────
+duckdb>=1.0.0             # MotherDuck queries
+apscheduler>=3.10.0       # nightly + morning scheduled jobs
+resend>=2.0.0             # daily report email
