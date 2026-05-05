@@ -1,4 +1,5 @@
 """MotherDuck identity lookup: resolve a phone number to an EnrolleeIdentity."""
+import os
 from typing import Optional
 
 import duckdb
@@ -6,7 +7,9 @@ import duckdb
 from .models import EnrolleeIdentity
 
 
-def _connect():
+def _connect() -> duckdb.DuckDBPyConnection:
+    if not os.environ.get("MOTHERDUCK_TOKEN"):
+        raise RuntimeError("MOTHERDUCK_TOKEN environment variable is not set.")
     return duckdb.connect("md:ai_driven_data")
 
 
