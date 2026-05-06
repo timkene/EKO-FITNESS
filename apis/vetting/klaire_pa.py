@@ -1482,51 +1482,63 @@ def check_cost_effectiveness(
 
     context = "INPATIENT admission" if encounter_type == "INPATIENT" else "outpatient visit"
 
-    def _fmt(p: Dict) -> str:
+    def _fmt_active(p: Dict) -> str:
         diag_str = ", ".join(f"{d['code']} ({d['name']})" for d in p.get("diagnoses", []))
-        status = "[ALREADY APPROVED TODAY — cannot auto-deny, agent must act]" if p.get("from_basket") else (
-            "[PENDING REVIEW]" if p.get("individual_decision") == "PENDING_REVIEW" else "[APPROVED]"
-        )
+        status = ("[PENDING REVIEW]" if p.get("individual_decision") == "PENDING_REVIEW"
+                  else "[CAN BE DENIED BY RULE 17]")
         return f"- {p['code']}: {p['name']}  {status}" + (f"  [for: {diag_str}]" if diag_str else "")
 
-    active_lines = "\n".join(_fmt(p) for p in active)
+    def _fmt_basket(p: Dict) -> str:
+        diag_str = ", ".join(f"{d['code']} ({d['name']})" for d in p.get("diagnoses", []))
+        return (f"- {p['code']}: {p['name']}  [ALREADY APPROVED TODAY — CANNOT AUTO-DENY — "
+                "agent must call provider to return/exchange]"
+                + (f"  [for: {diag_str}]" if diag_str else ""))
+
+    active_lines = "\n".join(_fmt_active(p) for p in active)
     basket_section = (
-        "\nALREADY APPROVED TODAY (cannot be auto-denied — but MUST be included in full regimen assessment):\n"
-        + "\n".join(_fmt(p) for p in basket)
+        "\nALREADY APPROVED TODAY — CANNOT BE AUTO-DENIED (agent must act if these should change):\n"
+        + "\n".join(_fmt_basket(p) for p in basket)
     ) if basket else ""
 
     basket_instruction = (
-        "\nIMPORTANT — BASKET ITEMS: The drugs marked [ALREADY APPROVED TODAY] have already been "
-        "dispensed/approved earlier this encounter. This system CANNOT deny them automatically. "
-        "However, if including them makes the overall regimen sub-optimal or redundant, you should:\n"
-        "  1. Deny the CURRENT REQUEST drug(s) that are redundant given the basket drug\n"
-        "  2. Set basket_action in your recommendation: name the basket drug the provider should "
-        "return/exchange and what it should be switched to. The agent will call the provider.\n"
-        "  Example: basket has Cefuroxime (URTI). Current request: Amoxicillin + Metronidazole (H. pylori). "
-        "Optimal: Clarithromycin triple therapy covers BOTH. → Deny Metronidazole, set basket_action: "
-        "'Provider should return Cefuroxime and substitute Clarithromycin 500mg BD x 14 days as part of "
-        "H. pylori triple therapy which also covers URTI'."
+        "\nBASKET RULE: Drugs marked [ALREADY APPROVED TODAY] cannot be denied by this system. "
+        "If the basket drug + current-batch drugs together are sub-optimal:\n"
+        "  → Deny the redundant CURRENT REQUEST drug(s)\n"
+        "  → Set basket_action: 'Provider should return [basket drug] and substitute [alternative]'\n"
+        "  The agent will call the provider to arrange the basket exchange."
     ) if basket else ""
 
     prompt = f"""You are a senior HMO clinical pharmacist in Nigeria ({context}) conducting a cost-effectiveness review.
 
-Your role: think like a health insurer. Assess the ENTIRE regimen — including already-approved basket drugs — and identify whether any drug in this request is:
-1. Redundant because another drug (in current batch OR basket) already covers that diagnosis/spectrum
-2. A more expensive option when a cheaper, clinically equivalent alternative exists
-3. One component of a combination when the combination is unnecessary
-4. A brand combination drug when one component alone is sufficient
+Your role: think like a health insurer. Assess the ENTIRE regimen and identify whether any drug in the CURRENT REQUEST is redundant or replaceable with a cheaper, equally effective option.
 
-ACTIVE PROCEDURES IN THIS REQUEST (these CAN be denied):
+KEY DISTINCTION:
+- ACTIVE PROCEDURES IN THIS REQUEST: drugs labelled [CAN BE DENIED BY RULE 17] — you MAY and SHOULD deny these if redundant.
+- ALREADY APPROVED TODAY: drugs labelled [ALREADY APPROVED TODAY — CANNOT AUTO-DENY] — you CANNOT deny these; use basket_action instead.
+
+ACTIVE PROCEDURES IN THIS REQUEST (deny these if not cost-effective):
 {active_lines}
 {basket_section}
 {basket_instruction}
 
 CLINICAL RULES TO APPLY:
-- Clarithromycin triple therapy (Amoxicillin 1g BD + Clarithromycin 500mg BD + PPI x 14 days) is the WHO/ACG first-line for H. pylori. Clarithromycin ALSO covers URTI pathogens (S. pneumoniae, H. influenzae via 14-OH metabolite, M. catarrhalis). If a URTI antibiotic was already approved AND H. pylori drugs are now requested, consider switching everything to clarithromycin triple therapy — deny redundant current-batch drugs and flag the basket antibiotic for return.
-- Paracetamol alone (500-1000mg QDS) is sufficient for mild-moderate pain. Orphenadrine/codeine addition is rarely justified without specific diagnosis. Combination brands cost more unnecessarily.
-- Diclofenac alone (50mg TDS) covers analgesia AND inflammation — adding paracetamol is rarely additive for mild pain.
-- For simple uncomplicated URTI: amoxicillin 500mg TDS is cheaper first-line. Cefuroxime/azithromycin only if allergy or documented failure.
-- Always consider the cheapest effective option. ONLY flag with strong clinical evidence — do not second-guess complex decisions.
+
+H. PYLORI + URTI PATTERN (most important):
+- If a patient has BOTH H. pylori AND URTI, the optimal regimen is Clarithromycin triple therapy:
+  Amoxicillin 1g BD + Clarithromycin 500mg BD + PPI (e.g. Omeprazole 20mg BD) x 14 days.
+- Clarithromycin covers URTI pathogens (S. pneumoniae, H. influenzae via 14-OH metabolite, M. catarrhalis) AND H. pylori simultaneously.
+- THEREFORE: if amoxicillin (H. pylori) + cefuroxime/azithromycin (URTI) + metronidazole (H. pylori) are ALL in the current request → DENY BOTH cefuroxime AND metronidazole. Keep amoxicillin. Recommend adding clarithromycin + PPI instead.
+- EXAMPLE: Current request has [amoxicillin for H. pylori] + [metronidazole for H. pylori] + [cefuroxime for URTI] → deny metronidazole AND deny cefuroxime → recommended_alternative: "Clarithromycin 500mg BD x 14 days (replaces both metronidazole and cefuroxime — covers H. pylori as triple therapy and URTI via macrolide spectrum). Also add PPI Omeprazole 20mg BD x 14 days."
+
+PAIN PATTERN:
+- Paracetamol alone (500-1000mg QDS) is sufficient for mild-moderate pain. Orphenadrine addition rarely justified without myospasm diagnosis.
+- Diclofenac alone (50mg TDS) covers analgesia + inflammation — paracetamol addition rarely additive for mild pain.
+
+URTI ALONE:
+- Simple uncomplicated URTI: amoxicillin 500mg TDS is cheaper first-line. Cefuroxime/azithromycin only if allergy or documented failure.
+
+GENERAL:
+- ONLY flag with strong clinical evidence. Do not second-guess clinically complex decisions.
 
 Respond in JSON only (no markdown):
 {{
@@ -1535,22 +1547,23 @@ Respond in JSON only (no markdown):
   "reasoning": "One concise sentence on overall cost-effectiveness of the full regimen.",
   "recommendations": [
     {{
-      "procedure_code": "code of CURRENT REQUEST drug to deny/substitute",
+      "procedure_code": "code of CURRENT REQUEST drug to deny (must be from the ACTIVE list)",
       "procedure_name": "name of that drug",
-      "reason": "Why this drug is not cost-effective given the full regimen (basket + current)",
-      "recommended_alternative": "Specific cheaper alternative with dose, duration, guideline reference.",
-      "basket_action": "If a basket drug should be returned/exchanged as part of the fix, state exactly: 'Provider should return [drug name] and substitute [alternative with dose]'. Leave empty string if no basket change needed.",
+      "reason": "Why this drug is not cost-effective given the full regimen",
+      "recommended_alternative": "Specific cheaper alternative with dose, duration, guideline. Be explicit — name the drug to add instead.",
+      "basket_action": "Only if a basket drug needs to be returned: 'Provider should return [drug name] and substitute [alternative with dose]'. Empty string if no basket action needed.",
       "deny": true or false
     }}
   ]
 }}
 
 STRICT RULES:
-- recommendations must only include drugs from ACTIVE PROCEDURES IN THIS REQUEST (never basket items — they are listed separately and cannot be auto-denied).
-- Set deny=true only for drugs that are clearly redundant or replaceable with strong evidence.
-- Set deny=false for concerns without strong evidence.
-- If cost_effective=true, recommendations must be an empty array.
-- basket_action must be a string (empty string if not applicable — never null)."""
+- recommendations MUST ONLY include drugs from ACTIVE PROCEDURES IN THIS REQUEST. NEVER put basket drugs in recommendations.
+- Set deny=true for drugs clearly redundant or replaceable with strong evidence.
+- Set deny=false for concerns only.
+- If cost_effective=true, recommendations must be empty array.
+- basket_action must always be a string (empty string if not applicable, never null).
+- When multiple current-batch drugs become redundant due to the same alternative, include ALL of them as separate recommendation entries."""
 
     ai = _call_claude(prompt)
     cost_effective  = bool(ai.get("cost_effective", True))
