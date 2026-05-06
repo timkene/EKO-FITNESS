@@ -447,17 +447,78 @@ def _render_pa_item(proc_res: dict, encounter_type: str = "OUTPATIENT"):
             )
             st.markdown(f"**Delisted diagnoses:** {pills}", unsafe_allow_html=True)
 
-        # First-line check
-        fl_dec   = first_line.get("decision", "")
-        fl_color = "#22c55e" if fl_dec == "APPROVE" else "#ef4444"
-        fl_src   = "Auto" if first_line.get("auto") else first_line.get("source", "ai").replace("_", " ").title()
-        st.markdown(
-            f'<span style="color:#94a3b8;font-size:0.88em;">First-line check: '
-            f'<strong style="color:{fl_color};">{fl_dec}</strong>'
-            f' ({first_line.get("confidence", 0)}% · {fl_src}) — '
-            f'{first_line.get("reasoning","")}</span>',
-            unsafe_allow_html=True,
-        )
+        # ── AI Recommendation box ─────────────────────────────────────────
+        # Determine the authoritative overall AI recommendation + triggering rule
+        _stored_ai_rec    = proc_res.get("ai_recommendation", "")
+        _combo_reason     = proc_res.get("combo_flag_reason", "")
+        _escalated_by     = proc_res.get("escalated_by", "")
+        _fl_dec           = first_line.get("decision", "")
+        _fl_reasoning     = first_line.get("reasoning", "")
+        _fl_conf          = first_line.get("confidence", 0)
+        _fl_src           = "Auto" if first_line.get("auto") else first_line.get("source", "ai").replace("_", " ").title()
+
+        # Map escalated_by to a human-readable rule label
+        _RULE_LABEL = {
+            "combo_check":         "Rule 11 — Procedure Combination Check",
+            "disease_combo_check": "Disease Combination Check",
+            "post_discharge":      "Rule 15 — Post-Discharge Overlap",
+            "qty_check":           "Rule 14 — Quantity Appropriateness",
+            "cost_check":          "Rule 17 — Cost-Effectiveness & Therapeutic Substitution",
+        }
+        _escalate_label = _RULE_LABEL.get(_escalated_by, "")
+
+        # Determine overall AI verdict
+        if _stored_ai_rec == "DENY" or _combo_reason:
+            _overall_ai = "DENY"
+            _ai_rule    = _escalate_label or "Rule 11 — Procedure Combination Check"
+            _ai_reason  = _combo_reason or _fl_reasoning
+        elif _fl_dec == "DENY":
+            _overall_ai = "DENY"
+            _ai_rule    = "Clinical Necessity / First-line Assessment"
+            _ai_reason  = _fl_reasoning
+        elif _fl_dec == "APPROVE":
+            _overall_ai = "APPROVE"
+            _ai_rule    = "Clinical Necessity / First-line Assessment"
+            _ai_reason  = _fl_reasoning
+        else:
+            _overall_ai = ""
+            _ai_rule    = ""
+            _ai_reason  = ""
+
+        if _overall_ai == "DENY":
+            st.markdown(
+                f'<div style="background:#2d0a0a;border:1px solid #dc2626;border-radius:8px;'
+                f'padding:10px 16px;margin:8px 0;">'
+                f'<span style="color:#f87171;font-size:0.95em;font-weight:700;">🤖 AI Recommendation: DENY</span>'
+                f'<span style="color:#fca5a5;font-size:0.82em;margin-left:8px;">({_fl_conf}% confidence)</span><br>'
+                f'<span style="color:#fca5a5;font-size:0.8em;font-weight:600;">Rule: {_ai_rule}</span><br>'
+                f'<span style="color:#fecaca;font-size:0.85em;">{_ai_reason}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        elif _overall_ai == "APPROVE":
+            st.markdown(
+                f'<div style="background:#052e16;border:1px solid #16a34a;border-radius:8px;'
+                f'padding:10px 16px;margin:8px 0;">'
+                f'<span style="color:#4ade80;font-size:0.95em;font-weight:700;">🤖 AI Recommendation: APPROVE</span>'
+                f'<span style="color:#86efac;font-size:0.82em;margin-left:8px;">({_fl_conf}% confidence · {_fl_src})</span><br>'
+                f'<span style="color:#86efac;font-size:0.8em;font-weight:600;">Rule: {_ai_rule}</span><br>'
+                f'<span style="color:#bbf7d0;font-size:0.85em;">{_ai_reason}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+        # First-line check compact line (source + concerns)
+        _fl_color = "#22c55e" if _fl_dec == "APPROVE" else "#ef4444"
+        if _fl_dec and not first_line.get("auto"):
+            _concerns = first_line.get("concerns", [])
+            _concerns_str = " | Concerns: " + "; ".join(_concerns) if _concerns else ""
+            st.markdown(
+                f'<span style="color:#64748b;font-size:0.82em;">First-line check: '
+                f'<strong style="color:{_fl_color};">{_fl_dec}</strong>'
+                f' ({_fl_conf}% · {_fl_src}){_concerns_str}</span>',
+                unsafe_allow_html=True,
+            )
 
         # Quantity check result
         if qty_adjusted:

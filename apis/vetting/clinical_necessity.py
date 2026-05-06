@@ -391,11 +391,11 @@ class ClinicalNecessityEngine:
 
             regimen_ctx = (
                 "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                "FULL PA REQUEST REGIMEN (same enrollee, same day)\n"
+                "FULL PA REQUEST REGIMEN (all co-prescribed procedures — same patient, same day)\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             )
             if approved_lines:
-                regimen_ctx += "Approved/remaining procedures:\n" + "\n".join(approved_lines) + "\n"
+                regimen_ctx += "Co-prescribed procedures (being submitted together):\n" + "\n".join(approved_lines) + "\n"
             if dropped_lines:
                 regimen_ctx += (
                     "\nDropped procedures (denied by earlier rules — provided for clinical context only):\n"
@@ -403,8 +403,16 @@ class ClinicalNecessityEngine:
                 )
             regimen_ctx += (
                 "\nNOTE: Evaluate ◄ THIS ITEM in the context of the COMPLETE regimen above. "
-                "Consider the dropped procedures as part of the intended treatment plan "
-                "when assessing whether the remaining procedures are clinically necessary "
+                "ALL procedures listed (except DROPPED) are being co-prescribed in the same PA batch — "
+                "treat them as confirmed simultaneous prescriptions. "
+                "If two drugs share the same diagnosis (e.g. amoxicillin + metronidazole both for H. pylori), "
+                "this IS combination/dual therapy — do NOT call it monotherapy. "
+                "IMPORTANT: Polypharmacy concerns apply ONLY when multiple drugs treat the SAME diagnosis "
+                "via the same mechanism. Drugs for DIFFERENT diagnoses (e.g. one antibiotic for H. pylori "
+                "AND a different antibiotic for URTI) are NOT polypharmacy — each serves a distinct purpose. "
+                "Evaluate ◄ THIS ITEM solely for its own diagnosis and clinical appropriateness, "
+                "not as a polypharmacy concern with items treating other unrelated conditions. "
+                "Consider DROPPED procedures as part of the intended treatment plan "
                 "(e.g. if triple therapy was intended but one component was dropped, "
                 "assess whether the remaining components are still appropriate).\n"
             )

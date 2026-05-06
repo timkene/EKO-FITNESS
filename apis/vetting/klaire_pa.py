@@ -283,6 +283,7 @@ def _validate_one_procedure(
     proc_name_hint: str = "",
     admission_status: str = "NOT_ADMITTED",
     session_basket: Optional[List[Dict]] = None,
+    batch_items: Optional[List[Dict]] = None,
 ) -> Dict:
     """
     Run comprehensive validation for every (procedure, diagnosis) pair,
@@ -406,6 +407,27 @@ def _validate_one_procedure(
         try:
             from .clinical_necessity import ClinicalNecessityEngine
             _cne    = ClinicalNecessityEngine(conn=engine.conn)
+
+            # Build full regimen context from the current PA batch so the AI
+            # knows ALL co-prescribed procedures (e.g. metronidazole alongside
+            # amoxicillin = dual therapy, not monotherapy).
+            _all_req_procs: List[Dict] = []
+            for _bi in (batch_items or []):
+                _bpc = (_bi.get("procedure_code") or "").strip().upper()
+                _bpn = _bi.get("procedure_name") or _bpc
+                _bdiag_codes = _bi.get("diagnosis_codes") or []
+                _bdiag_names = _bi.get("diagnosis_names") or {}
+                _bdc = _bdiag_codes[0] if _bdiag_codes else ""
+                _bdn = _bdiag_names.get(_bdc, _bdc)
+                if _bpc:
+                    _all_req_procs.append({
+                        "procedure_code": _bpc,
+                        "procedure_name": _bpn,
+                        "diagnosis_code": _bdc,
+                        "diagnosis_name": _bdn,
+                        "procedure_class": "",
+                    })
+
             _cn_res = _cne.check(
                 procedure_code=proc_code,
                 procedure_name=proc_name,
@@ -415,6 +437,7 @@ def _validate_one_procedure(
                 enrollee_id=enrollee_id,
                 encounter_date=encounter_date,
                 session_basket=session_basket,
+                all_request_procedures=_all_req_procs or None,
             )
             first_line = {
                 "decision":         "APPROVE" if _cn_res.passed else "DENY",
@@ -1341,32 +1364,36 @@ def check_procedure_combination(
 
     def _fmt(p: Dict) -> str:
         diag_str = ", ".join(f"{d['code']} ({d['name']})" for d in p.get("diagnoses", []))
-        return f"- {p['code']}: {p['name']}" + (f"  [for: {diag_str}]" if diag_str else "")
+        dec = p.get("individual_decision", "APPROVE")
+        if p.get("from_basket"):
+            status = "[ALREADY APPROVED THIS SESSION]"
+        elif dec == "DENY":
+            status = "[HARD DENIED — will NOT be prescribed]"
+        elif dec == "PENDING_REVIEW":
+            status = "[PENDING — individual check flagged concerns, agent may DENY this]"
+        else:
+            status = "[APPROVED by individual checks]"
+        return f"- {p['code']}: {p['name']}  {status}" + (f"  [for: {diag_str}]" if diag_str else "")
 
-    current_lines = "\n".join(_fmt(p) for p in current)
-    basket_section = ""
-    if basket:
-        basket_lines = "\n".join(_fmt(p) for p in basket)
-        basket_section = (
-            f"\nALREADY APPROVED THIS SESSION (do NOT deny these — context only):\n{basket_lines}\n"
-        )
+    all_lines = "\n".join(_fmt(p) for p in (current + basket))
 
     prompt = f"""You are a senior HMO medical reviewer in Nigeria ({context}).
 
-A provider has submitted a PA request. Below are the NEWLY REQUESTED procedures, plus any procedures already approved earlier in the same session.
+A provider has submitted a PA request. Each item below has a status showing its individual check outcome.
 
-NEWLY REQUESTED (you may recommend denying these if redundant):
-{current_lines}
-{basket_section}
-Your task: assess whether the combination of all procedures (new + already approved) is collectively medically necessary, or whether any NEWLY REQUESTED item is redundant, duplicative, or unjustified given what is already approved.
+ALL PROCEDURES IN THIS REQUEST:
+{all_lines}
 
-STRICT RULES:
-- NECESSARY: all new items serve distinct clinical purposes not already covered.
-- NOT NECESSARY: flag a new item if it treats the same condition via the same mechanism as an already-approved item (e.g. amoxicillin when cefuroxime is already approved for the same infection; two antipyretics; two NSAIDs; two same-class antibiotics without documented dual-therapy indication).
-- NOT NECESSARY: flag a diagnostic test that is clinically redundant given another already ordered.
-- Do NOT flag items for genuinely different conditions or standard combination therapy (ACT + paracetamol for malaria, HAART combos, dual antihypertensives for resistant hypertension).
-- Be strict with antibiotics: two broad-spectrum antibiotics for a simple outpatient infection are almost never justified unless there is a documented synergy or resistant-organism protocol.
-- When in doubt, mark NECESSARY — only flag CLEAR redundancy or unjustified duplication.
+Your task: Identify whether any APPROVED or PENDING item is REDUNDANT or UNJUSTIFIED given the OTHER items that are actually going to be prescribed.
+
+CRITICAL RULES:
+- HARD DENIED items ([HARD DENIED]) will NOT be prescribed. Do NOT use them as the basis for denying another item.
+- PENDING items ([PENDING]) may or may not be approved by the agent. If an item would ONLY be redundant because of a PENDING item (which itself may be denied), do NOT deny it — the agent will resolve that.
+- Only flag an item as redundant if it conflicts with an [APPROVED] or [ALREADY APPROVED] item that is certain to be prescribed.
+- Procedures for DIFFERENT diagnoses are generally NOT redundant — an antibiotic for H. pylori + a different antibiotic for URTI serve different conditions and should each be evaluated independently.
+- Standard combination therapy is NEVER redundant (amoxicillin + metronidazole for H. pylori is dual therapy, not redundancy).
+- Flag redundancy ONLY when two items treat the SAME diagnosis via the SAME mechanism AND one is already confirmed to be prescribed.
+- When in doubt, mark NECESSARY — only flag CLEAR, CERTAIN redundancy.
 
 Respond in JSON only (no markdown). No text before or after the JSON object:
 {{
@@ -1382,18 +1409,17 @@ Respond in JSON only (no markdown). No text before or after the JSON object:
       "name_a": "procedure name",
       "code_b": "procedure code",
       "name_b": "procedure name",
-      "reason": "why this new item is redundant given what is already approved"
+      "reason": "why this item is redundant given a CONFIRMED co-prescription"
     }}
   ]
 }}
 
 RULES for procedure_verdicts:
-- Include EVERY procedure code (new and already-approved) as a key.
-- Already-approved procedures must ALWAYS be "keep".
-- A newly requested procedure that is redundant or unjustified = "deny".
-- A newly requested procedure that is clinically necessary = "keep".
-- If necessary=true, all verdicts must be "keep".
-- Be consistent: if you flag a new item as redundant, mark it "deny"."""
+- Include every procedure code as a key.
+- HARD DENIED and ALREADY APPROVED items must always be "keep" (they are excluded from denial).
+- A PENDING or APPROVED item that is redundant with a CONFIRMED prescription = "deny".
+- A PENDING or APPROVED item serving a distinct purpose = "keep".
+- If necessary=true, all verdicts must be "keep"."""
 
     ai = _call_claude(prompt)
     necessary  = bool(ai.get("necessary", True))
@@ -1417,6 +1443,120 @@ RULES for procedure_verdicts:
         "procedure_verdicts": verdicts,
         "procedures_to_deny": procedures_to_deny,
         "requires_review":    not necessary,
+    }
+
+
+# ── Rule 17 — Cost-Effectiveness & Therapeutic Substitution ──────────────────
+
+def check_cost_effectiveness(
+    procedures: List[Dict],  # same shape as proc_combo_input
+    encounter_type: str = "OUTPATIENT",
+) -> Dict:
+    """
+    Evaluate whether the prescribed regimen is the most cost-effective
+    evidence-based option, or whether cheaper therapeutic equivalents exist.
+
+    Flags patterns like:
+    - Multiple drugs when one drug covers all diagnoses (e.g. clarithromycin
+      covers both H. pylori eradication AND URTI — cefuroxime is then redundant)
+    - Combination brand drugs when one component alone suffices (e.g.
+      paracetamol + orphenadrine when paracetamol alone is appropriate)
+    - Expensive drug when a cheaper equivalent has the same spectrum/efficacy
+    - Polypharmacy where guideline-recommended regimen uses fewer drugs
+
+    Never auto-denies. Always PENDING_REVIEW if flagged.
+    Returns recommended affordable alternatives with evidence backing.
+    """
+    # Only assess current-request, non-denied items — basket items are context only
+    active = [p for p in procedures if not p.get("from_basket")
+              and p.get("individual_decision") != "DENY"]
+    basket = [p for p in procedures if p.get("from_basket")]
+
+    if not active:
+        return {"cost_effective": True, "confidence": 100,
+                "reasoning": "No active procedures to assess.",
+                "recommendations": [], "requires_review": False}
+
+    context = "INPATIENT admission" if encounter_type == "INPATIENT" else "outpatient visit"
+
+    def _fmt(p: Dict) -> str:
+        diag_str = ", ".join(f"{d['code']} ({d['name']})" for d in p.get("diagnoses", []))
+        status = "[ALREADY APPROVED]" if p.get("from_basket") else (
+            "[PENDING REVIEW]" if p.get("individual_decision") == "PENDING_REVIEW" else "[APPROVED]"
+        )
+        return f"- {p['code']}: {p['name']}  {status}" + (f"  [for: {diag_str}]" if diag_str else "")
+
+    active_lines = "\n".join(_fmt(p) for p in active)
+    basket_lines = ("\nALREADY APPROVED THIS SESSION (context only):\n"
+                    + "\n".join(_fmt(p) for p in basket)) if basket else ""
+
+    prompt = f"""You are a senior HMO clinical pharmacist in Nigeria ({context}) conducting a cost-effectiveness review.
+
+Your role: think like a health insurer. Identify whether ANY drug in this regimen is:
+1. Redundant because another drug already covers that diagnosis/spectrum
+2. A more expensive option when a cheaper, clinically equivalent alternative exists
+3. One component of a combination when the combination is unnecessary
+4. A brand combination drug (e.g. paracetamol + orphenadrine as a single brand) when one component alone is sufficient
+
+ACTIVE PROCEDURES IN THIS REQUEST:
+{active_lines}
+{basket_lines}
+
+CLINICAL RULES TO APPLY:
+- Clarithromycin triple therapy (Amoxicillin 1g BD + Clarithromycin 500mg BD + PPI x 14 days) is the WHO/ACG first-line for H. pylori. The clarithromycin ALSO covers acute URTI pathogens (S. pneumoniae, H. influenzae via 14-OH metabolite, M. catarrhalis). If H. pylori drugs are prescribed AND a separate URTI antibiotic is added, the URTI antibiotic may be redundant if switching to clarithromycin-based triple therapy.
+- Paracetamol alone (500-1000mg QDS) is sufficient for mild-moderate pain. Adding orphenadrine (muscle relaxant) is rarely justified without specific myospasm diagnosis. Combination brands (paracetamol + orphenadrine, paracetamol + codeine) cost more and add unnecessary drug exposure.
+- Diclofenac alone (50mg TDS) provides analgesia AND anti-inflammatory effect — co-prescribing paracetamol is rarely additive for mild pain without specific indication.
+- For simple uncomplicated URTI: amoxicillin 500mg TDS is cheaper first-line. Cefuroxime/azithromycin should only be prescribed if allergy or documented amoxicillin failure.
+- Always consider the cheapest effective option. Generic equivalents should be flagged when branded drugs are prescribed.
+- ONLY flag when you have strong clinical evidence. If in doubt, do NOT flag — do not second-guess clinically complex decisions.
+
+For each drug you flag, you MUST provide:
+1. The SPECIFIC cheaper alternative with dose and duration
+2. The clinical evidence (guideline name, principle)
+3. The estimated cost benefit
+
+Respond in JSON only (no markdown):
+{{
+  "cost_effective": true or false,
+  "confidence": 0-100,
+  "reasoning": "One concise sentence summarising the overall cost-effectiveness assessment.",
+  "recommendations": [
+    {{
+      "procedure_code": "code of drug to deny/substitute",
+      "procedure_name": "name of drug",
+      "reason": "Why this drug is not cost-effective given the regimen",
+      "recommended_alternative": "Specific cheaper alternative with dose, duration, and guideline reference. State clearly what to prescribe instead.",
+      "deny": true or false
+    }}
+  ]
+}}
+
+RULES:
+- recommendations must only include drugs from ACTIVE PROCEDURES list (never basket items).
+- Set deny=true only for drugs that are clearly redundant or replaceable with strong evidence.
+- Set deny=false for drugs worth flagging as a concern but not denying outright.
+- If cost_effective=true, recommendations must be empty.
+- Be specific in recommended_alternative — name the exact drug, dose, and frequency."""
+
+    ai = _call_claude(prompt)
+    cost_effective  = bool(ai.get("cost_effective", True))
+    confidence      = int(ai.get("confidence", 0))
+    reasoning       = ai.get("reasoning", "")
+    recommendations = ai.get("recommendations", [])
+
+    # Only keep recommendations for deny=true with a valid active procedure code
+    active_codes = {p["code"].upper() for p in active}
+    deny_recs = [
+        r for r in recommendations
+        if r.get("deny") and (r.get("procedure_code") or "").upper() in active_codes
+    ]
+
+    return {
+        "cost_effective":  cost_effective,
+        "confidence":      confidence,
+        "reasoning":       reasoning,
+        "recommendations": deny_recs,
+        "requires_review": not cost_effective and bool(deny_recs),
     }
 
 
@@ -1469,6 +1609,7 @@ def validate_pa_request(
             quantity=int(item.get("quantity") or 1),
             admission_status=admission_status,
             session_basket=session_basket,
+            batch_items=items,
         )
 
     # Run all procedures in parallel — each thread has its own DuckDB connection
@@ -1633,12 +1774,60 @@ def validate_pa_request(
         # Escalate only if procedure was explicitly identified as redundant by the
         # procedure combination check. Disease combo flags stay as banners only.
         if pc in flagged_proc_codes:
+            # Build a specific reason naming the conflicting drug(s)
+            _pair_reason = None
+            for fi in proc_combo_check.get("flagged_items", []):
+                ca = (fi.get("code_a") or "").upper()
+                cb = (fi.get("code_b") or "").upper()
+                if ca == pc or cb == pc:
+                    conflict_code = cb if ca == pc else ca
+                    conflict_name = fi.get("name_b") if ca == pc else fi.get("name_a")
+                    _pair_reason = (
+                        f"Procedure combination check (Rule 11): {res.get('procedure_name', pc)} "
+                        f"conflicts with {conflict_name} ({conflict_code}) — "
+                        f"{fi.get('reason', 'redundant given other approved items in this request')}"
+                    )
+                    break
+            _flag_reason = _pair_reason or (
+                f"Procedure combination check (Rule 11): {res.get('procedure_name', pc)} "
+                f"is redundant given other items in this request — AI recommends denial."
+            )
             _escalate_to_review(
                 res,
                 escalated_by="combo_check",
-                flag_reason="Flagged by procedure combination necessity check — AI recommends denying this procedure as redundant given the other items in this request.",
+                flag_reason=_flag_reason,
                 ai_recommendation="DENY",
             )
+
+    # ── Rule 17 — Cost-Effectiveness & Therapeutic Substitution ─────────────────
+    # Run after all other checks so it has the final individual_decision per item.
+    # Update proc_combo_input individual_decision to reflect post-escalation state.
+    for entry in proc_combo_input:
+        ec = entry["code"].upper()
+        for r in results:
+            if r.get("procedure_code", "").upper() == ec:
+                entry["individual_decision"] = r.get("decision", entry["individual_decision"])
+                break
+
+    cost_check = check_cost_effectiveness(proc_combo_input, encounter_type)
+
+    for rec in cost_check.get("recommendations", []):
+        deny_code = (rec.get("procedure_code") or "").upper()
+        alternative = rec.get("recommended_alternative", "")
+        deny_reason = rec.get("reason", "")
+        flag_reason = (
+            f"Cost-effectiveness check (Rule 17): {rec.get('procedure_name', deny_code)} "
+            f"is not the most cost-effective option for this regimen. {deny_reason}"
+            + (f" Recommended alternative: {alternative}" if alternative else "")
+        )
+        for res in results:
+            if res.get("procedure_code", "").upper() == deny_code and res.get("decision") != "DENY":
+                _escalate_to_review(
+                    res,
+                    escalated_by="cost_check",
+                    flag_reason=flag_reason,
+                    ai_recommendation="DENY",
+                )
 
     decisions = [r["decision"] for r in results]
     if all(d == "APPROVE" for d in decisions):
@@ -1650,12 +1839,14 @@ def validate_pa_request(
     else:
         overall = "PARTIAL"
 
-    # Combo checks failure escalates overall to PENDING_REVIEW
+    # Combo/cost checks failure escalates overall to PENDING_REVIEW
     if combo_check["requires_review"] and overall not in ("DENY", "PENDING_REVIEW"):
         overall = "PENDING_REVIEW"
     if proc_combo_check["requires_review"] and overall not in ("DENY", "PENDING_REVIEW"):
         overall = "PENDING_REVIEW"
     if mismatch_check["requires_review"] and overall not in ("DENY", "PENDING_REVIEW"):
+        overall = "PENDING_REVIEW"
+    if cost_check["requires_review"] and overall not in ("DENY", "PENDING_REVIEW"):
         overall = "PENDING_REVIEW"
     if post_discharge_flags and overall not in ("DENY", "PENDING_REVIEW"):
         overall = "PENDING_REVIEW"
@@ -1670,11 +1861,13 @@ def validate_pa_request(
         "items":                   results,
         "disease_combination":     combo_check,
         "procedure_combination":   proc_combo_check,
+        "cost_effectiveness":      cost_check,
         "diagnosis_encounter_mismatch": mismatch_check,
         "post_discharge_flags":    post_discharge_flags,
         "requires_agent_review":   any(r.get("requires_agent_review") for r in results)
                                    or combo_check["requires_review"]
                                    or proc_combo_check["requires_review"]
+                                   or cost_check["requires_review"]
                                    or mismatch_check["requires_review"]
                                    or bool(post_discharge_flags),
     }
