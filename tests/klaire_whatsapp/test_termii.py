@@ -32,23 +32,31 @@ def test_split_message_long():
     assert all(len(c) <= 1000 for c in chunks)
 
 def test_verify_signature_no_secret(monkeypatch):
-    monkeypatch.delenv("TERMII_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("D360_WEBHOOK_SECRET", raising=False)
     assert verify_signature(b"payload", "anything") is True
 
 def test_verify_signature_valid(monkeypatch):
-    monkeypatch.setenv("TERMII_WEBHOOK_SECRET", "mysecret")
+    monkeypatch.setenv("D360_WEBHOOK_SECRET", "mysecret")
     payload = b"test_payload"
-    sig = hmac.new(b"mysecret", payload, hashlib.sha256).hexdigest()
+    sig = "sha256=" + hmac.new(b"mysecret", payload, hashlib.sha256).hexdigest()
     assert verify_signature(payload, sig) is True
 
 def test_verify_signature_invalid(monkeypatch):
-    monkeypatch.setenv("TERMII_WEBHOOK_SECRET", "mysecret")
-    assert verify_signature(b"test_payload", "wrongsig") is False
+    monkeypatch.setenv("D360_WEBHOOK_SECRET", "mysecret")
+    assert verify_signature(b"test_payload", "sha256=wronghex") is False
 
 @pytest.mark.anyio
 async def test_send_whatsapp_success():
     mock_resp = MagicMock()
     mock_resp.status_code = 200
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_resp):
+        result = await send_whatsapp("2348012345678", "Hello")
+    assert result is True
+
+@pytest.mark.anyio
+async def test_send_whatsapp_201_also_ok():
+    mock_resp = MagicMock()
+    mock_resp.status_code = 201
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_resp):
         result = await send_whatsapp("2348012345678", "Hello")
     assert result is True
@@ -73,3 +81,25 @@ async def test_send_whatsapp_network_error():
     with patch("httpx.AsyncClient.post", side_effect=httpx.RequestError("timeout")):
         result = await send_whatsapp("2348012345678", "Hello")
     assert result is False
+
+@pytest.mark.anyio
+async def test_send_uses_360dialog_payload(monkeypatch):
+    """Verify the outgoing JSON uses 360dialog format, not Termii format."""
+    monkeypatch.setenv("D360_API_KEY", "testkey")
+    captured = {}
+
+    async def fake_post(url, headers=None, json=None, **kwargs):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        m = MagicMock()
+        m.status_code = 200
+        return m
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock, side_effect=fake_post):
+        await send_whatsapp("2348012345678", "Hi")
+
+    assert "waba-v2.360dialog.io" in captured["url"]
+    assert captured["headers"]["D360-API-KEY"] == "testkey"
+    assert captured["json"]["messaging_product"] == "whatsapp"
+    assert captured["json"]["text"]["body"] == "Hi"

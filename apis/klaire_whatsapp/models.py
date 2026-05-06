@@ -9,12 +9,34 @@ def _utcnow() -> datetime:
 
 
 class TermiiInbound(BaseModel):
+    """Legacy Termii format — kept for test compatibility."""
     model_config = ConfigDict(populate_by_name=True)
 
     from_: str = Field(alias="from")
     to: str
     text: str
     type: str = "incoming"
+
+
+class D360Message(BaseModel):
+    """Inbound message extracted from a 360dialog/Meta WhatsApp webhook payload."""
+    from_phone: str
+    text: str
+
+    @classmethod
+    def from_webhook(cls, raw: dict) -> Optional["D360Message"]:
+        """Return extracted message or None for non-text events / malformed payloads."""
+        try:
+            value = raw["entry"][0]["changes"][0]["value"]
+            messages = value.get("messages")
+            if not messages:
+                return None
+            msg = messages[0]
+            if msg.get("type") != "text":
+                return None
+            return cls(from_phone=msg["from"], text=msg["text"]["body"])
+        except (KeyError, IndexError, TypeError):
+            return None
 
 
 class EnrolleeIdentity(BaseModel):
