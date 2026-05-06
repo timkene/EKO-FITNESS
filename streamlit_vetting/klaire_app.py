@@ -734,14 +734,7 @@ with st.sidebar:
     st.caption("Complete all fields before submitting.")
 
 # ── Top-level mode selector ───────────────────────────────────────────────────
-pending_count   = 0
-learning_count  = 0
-try:
-    rc = requests.get(f"{API}/api/v1/klaire/reviews?limit=1", timeout=5)
-    if rc.ok:
-        pending_count = rc.json().get("total_pending", 0)
-except Exception:
-    pass
+learning_count = 0
 try:
     lc = requests.get(f"{API}/api/v1/klaire/all-learnings?limit=1", timeout=5)
     if lc.ok:
@@ -749,10 +742,9 @@ try:
 except Exception:
     pass
 
-review_label   = "🛡️  Agent Review"  + (f" ({pending_count})"  if pending_count  else "")
 learning_label = "📚 Learning Review" + (f" ({learning_count})" if learning_count else "")
 
-_mode_options = ["📋 New Request", "💊 PA Request", review_label, learning_label]
+_mode_options = ["📋 New Request", "💊 PA Request", learning_label]
 
 # Use a stable index so dynamic count badges don't break selection on rerun
 if "klaire_mode_idx" not in st.session_state:
@@ -1171,7 +1163,7 @@ elif "PA Request" in mode:
                                 st.session_state["admission_review_id"] = adm_data.get("review_id")
                                 st.success(
                                     f"Admission request submitted (review ID: {adm_data.get('review_id', '?')}). "
-                                    "Go to Agent Review to approve, then return here to submit procedures."
+                                    "Once the admission is approved, click the button below to proceed."
                                 )
                             except Exception as ex:
                                 st.error(f"Admission request failed: {ex}")
@@ -1186,7 +1178,7 @@ elif "PA Request" in mode:
             if st.session_state.get("admission_review_id"):
                 st.markdown("---")
                 st.info(
-                    "⏳ Waiting for admission approval in Agent Review tab. "
+                    "⏳ Waiting for admission approval. "
                     "Once approved, click the button below to unlock the procedure form."
                 )
                 if st.button("✅ Admission approved — proceed to procedures", key="pa_adm_unlock", type="primary"):
@@ -1562,280 +1554,6 @@ elif "PA Request" in mode:
             st.json(pa_result)
 
     st.stop()
-
-elif "Agent Review" in mode:
-    # ══════════════════════════════════════════════════════════════════════════
-    # AGENT REVIEW QUEUE — ALL review types
-    # ══════════════════════════════════════════════════════════════════════════
-    st.markdown("### 🛡️  Agent Review Queue")
-    st.caption(
-        "All pending AI recommendations that need agent confirmation — "
-        "specialist-diagnosis checks, first-line treatment checks, and PA rule evaluations."
-    )
-
-    btn_col1, btn_col2, _ = st.columns([1, 1, 5])
-    with btn_col1:
-        if st.button("🔄 Refresh", key="refresh_reviews", use_container_width=True):
-            st.rerun()
-    with btn_col2:
-        if st.button("🗑️ Clear All", key="clear_all_reviews", use_container_width=True, help="Delete every entry in the review queue"):
-            try:
-                r = requests.delete(f"{API}/api/v1/klaire/reviews/clear-all", timeout=10)
-                r.raise_for_status()
-                st.success(r.json().get("message", "Queue cleared."))
-                st.rerun()
-            except Exception as ex:
-                st.error(f"Clear failed: {ex}")
-
-    try:
-        resp = requests.get(f"{API}/api/v1/klaire/reviews?limit=100", timeout=10)
-        resp.raise_for_status()
-        data    = resp.json()
-        reviews = data.get("reviews", [])
-        total   = data.get("total_pending", 0)
-    except Exception as e:
-        st.error(f"Could not load review queue: {e}")
-        reviews = []
-        total   = 0
-
-    if not reviews:
-        st.info("No pending reviews. All evaluations are resolved.")
-    else:
-        st.caption(f"{total} pending review(s)")
-        for rv in reviews:
-            rid          = rv.get("review_id", "")
-            review_type  = rv.get("review_type", "SPECIALIST")
-
-            with st.container(border=True):
-                rc1, rc2 = st.columns([3, 1])
-
-                with rc1:
-                    if review_type in ("PA_OUTPATIENT", "PA_PREAUTH"):
-                        # ── PA No-Auth / Pre-Auth procedure review card ────
-                        proc_code  = rv.get("procedure_code", "")
-                        proc_name  = rv.get("procedure_name", proc_code)
-                        approved   = rv.get("approved_diagnoses", [])
-                        denied     = rv.get("denied_diagnoses", [])
-                        diag_names = rv.get("diag_names", {})
-                        reasons    = rv.get("review_reasons", [])
-                        fl         = rv.get("first_line", {})
-                        inj_check  = rv.get("injection_check", {})
-                        enrollee   = rv.get("enrollee_id") or "—"
-                        enc_date   = rv.get("encounter_date", "")
-
-                        # Derive overall AI recommendation.
-                        # combo_flag_reason / ai_recommendation=="DENY" means a
-                        # combination check overrode the individual first_line result.
-                        fl_decision      = fl.get("decision", "APPROVE") if fl else "APPROVE"
-                        combo_flag_reason = rv.get("combo_flag_reason", "")
-                        stored_ai_rec    = rv.get("ai_recommendation", "")
-                        # Overall = DENY when stored_ai_rec is explicitly DENY (combo/clinical flag)
-                        ai_rec  = "DENY" if (stored_ai_rec == "DENY" or combo_flag_reason) else fl_decision
-                        ai_conf = fl.get("confidence", 0) if fl else 0
-
-                        # Badge row
-                        badge_html = (
-                            '<span style="background:#7c3aed;color:#ede9fe;border-radius:4px;'
-                            'padding:2px 8px;font-size:0.8em;">💊 PA PRE-AUTH</span>'
-                            if review_type == "PA_PREAUTH" else
-                            '<span style="background:#4c1d95;color:#ddd6fe;border-radius:4px;'
-                            'padding:2px 8px;font-size:0.8em;">💊 PA NO-AUTH</span>'
-                        )
-                        st.markdown(badge_html, unsafe_allow_html=True)
-
-                        st.markdown(
-                            f"**{proc_code}** — {proc_name}  \n"
-                            f"Enrollee: `{enrollee}`"
-                            + (f"  ·  {enc_date}" if enc_date else "")
-                        )
-
-                        # ── Explicit AI recommendation box ─────────────────
-                        if ai_rec == "DENY":
-                            # Primary deny reason: combo flag overrides first_line
-                            deny_reason = combo_flag_reason or fl.get("reasoning", "")
-                            st.markdown(
-                                f'<div style="background:#2d0a0a;border:1px solid #dc2626;'
-                                f'border-radius:8px;padding:10px 16px;margin:8px 0;">'
-                                f'<strong style="color:#f87171;font-size:1em;">🤖 AI Recommendation: DENY</strong>'
-                                + (f'<span style="color:#fca5a5;font-size:0.85em;margin-left:8px;">({ai_conf}% confidence)</span>' if not combo_flag_reason else '')
-                                + f'<br><span style="color:#fecaca;font-size:0.88em;">{deny_reason}</span>'
-                                + (
-                                    f'<br><span style="color:#9ca3af;font-size:0.8em;margin-top:4px;display:block;">'
-                                    f'ℹ️ Individual check: {fl_decision} ({ai_conf}%) — {fl.get("reasoning","")}'
-                                    f'</span>'
-                                    if combo_flag_reason and fl_decision == "APPROVE" else ""
-                                )
-                                + f'</div>',
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.markdown(
-                                f'<div style="background:#052e16;border:1px solid #16a34a;'
-                                f'border-radius:8px;padding:10px 16px;margin:8px 0;">'
-                                f'<strong style="color:#4ade80;font-size:1em;">🤖 AI Recommendation: APPROVE</strong>'
-                                f'<span style="color:#86efac;font-size:0.85em;margin-left:8px;">({ai_conf}% confidence)</span><br>'
-                                f'<span style="color:#bbf7d0;font-size:0.88em;">{fl.get("reasoning","")}</span>'
-                                f'</div>',
-                                unsafe_allow_html=True,
-                            )
-
-                        if approved:
-                            pills = "  ".join(f'`{c}` {diag_names.get(c, c)}' for c in approved)
-                            st.markdown(f"✅ Approved diagnoses: {pills}")
-                        if denied:
-                            pills = "  ".join(f'`{c}` {diag_names.get(c, c)}' for c in denied)
-                            st.markdown(f"❌ Delisted diagnoses: {pills}")
-
-                        # Rule 12 injection advisory
-                        if inj_check.get("triggered"):
-                            if inj_check.get("justified"):
-                                st.markdown(
-                                    '<div style="background:#052e16;border-left:3px solid #16a34a;'
-                                    'border-radius:5px;padding:6px 12px;margin-top:6px;">'
-                                    '<span style="color:#bbf7d0;font-size:0.85em;">'
-                                    f'✅ Injection-Without-Admission: diagnosis justifies parenteral route — {inj_check.get("reasoning","")}'
-                                    '</span></div>',
-                                    unsafe_allow_html=True,
-                                )
-                            else:
-                                st.markdown(
-                                    '<div style="background:#431407;border-left:3px solid #ea580c;'
-                                    'border-radius:5px;padding:6px 12px;margin-top:6px;">'
-                                    '<span style="color:#fed7aa;font-size:0.85em;">'
-                                    f'🟠 Injection-Without-Admission: oral alternative not documented — {inj_check.get("reasoning","")}'
-                                    '</span></div>',
-                                    unsafe_allow_html=True,
-                                )
-
-                        # Price info
-                        tariff_price   = rv.get("tariff_price")
-                        provider_price = rv.get("provider_price")
-                        price_override = rv.get("price_override", False)
-                        comment        = rv.get("comment", "")
-
-                        if tariff_price is not None or provider_price is not None:
-                            if price_override:
-                                diff_pct = ""
-                                if tariff_price and provider_price:
-                                    diff = abs(provider_price - tariff_price) / tariff_price * 100
-                                    direction = "above" if provider_price > tariff_price else "below"
-                                    diff_pct = f" — {diff:.1f}% {direction} tariff"
-                                tariff_str   = f"₦{tariff_price:,.2f}" if tariff_price else "No contracted tariff"
-                                provider_str = f"₦{provider_price:,.2f}" if provider_price else "—"
-                                st.markdown(
-                                    f'<div style="background:#1c0f00;border:1px solid #d97706;'
-                                    f'border-radius:6px;padding:8px 12px;margin-top:6px;">'
-                                    f'<span style="color:#fcd34d;font-size:0.88em;">💰 Price Override{diff_pct}</span><br>'
-                                    f'<span style="color:#fde68a;font-size:0.85em;">Tariff: {tariff_str} &nbsp;|&nbsp; Provider: {provider_str}</span>'
-                                    f'</div>',
-                                    unsafe_allow_html=True,
-                                )
-                            elif tariff_price is not None:
-                                st.caption(f"💰 Tariff price: ₦{tariff_price:,.2f}")
-
-                        if comment:
-                            st.caption(f"💬 Comment: {comment}")
-                        for r in reasons:
-                            st.caption(f"⚠️ {r}")
-
-                    elif review_type == "PA_ADMISSION":
-                        # ── Admission review card ──────────────────────────
-                        adm_code_map = {"ADM01": "Private Room", "ADM02": "Semi-Private Room", "ADM03": "General Room"}
-                        adm_code  = rv.get("admission_code", "")
-                        adm_name  = adm_code_map.get(adm_code, adm_code)
-                        adm_days  = rv.get("days", "?")
-                        adm_diags = rv.get("admitting_diagnosis_names", {})
-                        ai_adv    = rv.get("ai_advisory", "")
-
-                        st.markdown(
-                            '<span style="background:#1e3a5f;color:#bae6fd;border-radius:4px;'
-                            'padding:2px 8px;font-size:0.8em;">🏥 PA ADMISSION</span>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(
-                            f"**{adm_code} — {adm_name}** · {adm_days} day(s)  \n"
-                            f"Enrollee: `{rv.get('enrollee_id','')}`  \n"
-                            f"Provider: {rv.get('hospital_name','') or rv.get('provider_id','')}"
-                        )
-                        if adm_diags:
-                            diag_pills = "  ".join(f'`{c}` {n}' for c, n in adm_diags.items())
-                            st.markdown(f"**Admitting diagnoses:** {diag_pills}")
-                        if ai_adv:
-                            st.markdown(
-                                f'<div style="background:#0f2a3a;border-left:3px solid #38bdf8;'
-                                f'border-radius:5px;padding:8px 14px;margin-top:6px;">'
-                                f'<span style="color:#7dd3fc;font-size:0.85em;font-weight:700;">AI Advisory</span><br>'
-                                f'<span style="color:#bae6fd;font-size:0.85em;">{ai_adv}</span>'
-                                f'</div>',
-                                unsafe_allow_html=True,
-                            )
-
-                    else:
-                        # ── Specialist-diagnosis review card ───────────────
-                        ai_rec  = rv.get("ai_decision", "")
-                        ai_conf = rv.get("ai_confidence", 0)
-                        ai_why  = rv.get("ai_reasoning", "")
-                        src     = rv.get("learning_source", "ai")
-                        uses    = rv.get("usage_count", 1)
-
-                        badge_col = "#166534" if ai_rec == "APPROVE" else "#7f1d1d"
-                        badge_txt = "#bbf7d0" if ai_rec == "APPROVE" else "#fecaca"
-
-                        st.markdown(
-                            f'<span style="background:#1e3a5f;color:#bae6fd;border-radius:4px;'
-                            f'padding:2px 8px;font-size:0.8em;">🏥 SPECIALIST</span>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(
-                            f"**{rv.get('specialist_code','')} — {rv.get('specialist_name','')}**  \n"
-                            f"Diagnosis: `{rv.get('diagnosis_code','')}` — {rv.get('diagnosis_name','')}  \n"
-                            f"Enrollee: `{rv.get('enrollee_id','')}` · {rv.get('encounter_date','')} · {rv.get('hospital_name','')}"
-                        )
-                        src_label = f"Learning table (used {uses}x)" if src == "learning_table" else "AI — first evaluation"
-                        st.markdown(
-                            f'<div style="background:{badge_col};border-radius:6px;padding:8px 12px;margin-top:6px;">'
-                            f'<strong style="color:{badge_txt};">AI: {ai_rec} ({ai_conf}%)</strong>'
-                            f'<span style="color:{badge_txt};font-size:0.88em;"> · {src_label}</span><br>'
-                            f'<span style="color:{badge_txt};font-size:0.88em;">{ai_why}</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                        if rv.get("qa_flag"):
-                            st.caption(f"⚠️ QA: {rv.get('qa_reason','')}")
-
-                with rc2:
-                    agent = st.text_input("Agent", value="Agent", key=f"rv_agent_{rid}", label_visibility="collapsed")
-                    notes = st.text_input("Notes", placeholder="Justification…", key=f"rv_notes_{rid}", label_visibility="collapsed")
-                    if review_type in ("PA_OUTPATIENT", "PA_PREAUTH"):
-                        _rv_basket = {
-                            "enrollee_id":      rv.get("enrollee_id", ""),
-                            "procedure_code":   rv.get("procedure_code", ""),
-                            "procedure_name":   rv.get("procedure_name", ""),
-                            "approved_diagnoses": rv.get("approved_diagnoses", []),
-                            "diag_names":       rv.get("diag_names", {}),
-                            "quantity":         rv.get("quantity", 1),
-                            "branch":           "INPATIENT" if review_type == "PA_PREAUTH" else "OUTPATIENT",
-                        }
-                        if st.button("✅ Agree with AI", key=f"rv_app_{rid}", use_container_width=True, type="primary", help="Confirm AI's individual rule results are correct"):
-                            _submit_review(rid, "AGREE", agent, notes, basket_item=_rv_basket)
-                            st.rerun()
-                        if st.button("❌ Override AI", key=f"rv_den_{rid}", use_container_width=True, help="Disagree with AI — your decision overrides"):
-                            _submit_review(rid, "OVERRIDE", agent, notes, basket_item=_rv_basket)
-                            st.rerun()
-                    elif review_type == "PA_ADMISSION":
-                        if st.button("✅ Approve Admission", key=f"rv_app_{rid}", use_container_width=True, type="primary"):
-                            _submit_review(rid, "APPROVE", agent, notes)
-                            st.rerun()
-                        if st.button("❌ Deny Admission", key=f"rv_den_{rid}", use_container_width=True):
-                            _submit_review(rid, "DENY", agent, notes)
-                            st.rerun()
-                    else:
-                        if st.button("✅ Approve", key=f"rv_app_{rid}", use_container_width=True, type="primary"):
-                            _submit_review(rid, "APPROVE", agent, notes)
-                            st.rerun()
-                        if st.button("❌ Deny", key=f"rv_den_{rid}", use_container_width=True):
-                            _submit_review(rid, "DENY", agent, notes)
-                            st.rerun()
 
     st.stop()
 
