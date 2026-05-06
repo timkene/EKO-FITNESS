@@ -11,7 +11,7 @@ from pymongo.server_api import ServerApi
 
 from .models import EnrolleeIdentity, AftercarContext
 from .diagnosis_map import icd10_to_plain
-from . import session, termii
+from . import session, termii, feedback
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +251,18 @@ async def handle_reply(
     session.save_session(phone, {"aftercare_context": ctx_updated.model_dump()})
 
     if turn >= 4:
+        rating = feedback.extract_rating(text)
+        adherence = feedback.detect_adherence_flag(text)
+        escalated = feedback.detect_escalation(text)
+        feedback.save_feedback(
+            enrollee_id=enrollee.legacycode,
+            panumber=ctx.panumber,
+            hospital=ctx.hospital,
+            rating=rating,
+            comment=text if len(text) > 3 else None,
+            adherence_flag=adherence,
+            escalated=escalated,
+        )
         session.save_session(phone, {"mode": "front_desk", "aftercare_context": None})
 
     return reply
