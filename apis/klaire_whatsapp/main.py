@@ -1,7 +1,7 @@
 """Klaire WhatsApp Agent — FastAPI service (port 8004).
 
-Webhook format: 360dialog / Meta WhatsApp Business API v2.
-Aftercare routing added here; APScheduler jobs wired in Task 12.
+Webhook provider: 360dialog (Meta WABA v2).
+Scheduled jobs: nightly aftercare at 20:00 WAT, daily report at 07:00 WAT.
 """
 import os
 import logging
@@ -11,9 +11,10 @@ from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from .models import D360Message
-from . import identity, session, termii, front_desk
+from . import identity, session, termii, front_desk, aftercare, report
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -23,9 +24,23 @@ scheduler = AsyncIOScheduler(timezone="Africa/Lagos")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # APScheduler jobs (nightly aftercare + daily report) wired in Task 12
+    scheduler.add_job(
+        aftercare.run_nightly_outreach,
+        CronTrigger(hour=20, minute=0, timezone="Africa/Lagos"),
+        id="nightly_aftercare",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        report.generate_and_send,
+        CronTrigger(hour=7, minute=0, timezone="Africa/Lagos"),
+        id="daily_report",
+        replace_existing=True,
+    )
     scheduler.start()
-    logger.info("Klaire WhatsApp service started on port 8004")
+    logger.info(
+        "Klaire WhatsApp service started — "
+        "nightly_aftercare at 20:00 WAT, daily_report at 07:00 WAT"
+    )
     yield
     scheduler.shutdown()
     logger.info("Klaire WhatsApp service stopped")
@@ -51,7 +66,7 @@ async def webhook_verify(
     hub_verify_token: str = Query(default="", alias="hub.verify_token"),
     hub_challenge: str = Query(default="", alias="hub.challenge"),
 ):
-    """360dialog/Meta webhook verification endpoint."""
+    """360dialog/Meta webhook verification handshake."""
     verify_token = os.getenv("D360_VERIFY_TOKEN", "")
     if hub_mode == "subscribe" and hub_verify_token == verify_token:
         logger.info("Webhook verification passed")
@@ -74,7 +89,6 @@ async def whatsapp_webhook(request: Request):
 
     msg = D360Message.from_webhook(payload)
     if msg is None:
-        # Non-text event (status update, template delivery report, etc.) — acknowledge silently
         return {"status": "ignored"}
 
     phone = termii.normalise_phone(msg.from_phone)
@@ -92,8 +106,11 @@ async def whatsapp_webhook(request: Request):
         return {"status": "not_found"}
 
     sess = session.load_session(phone)
-    # Aftercare routing wired in Task 12 once aftercare.py exists
-    reply = await front_desk.handle(phone, text, enrollee, sess.get("messages", []))
+
+    if sess.get("mode") == "aftercare" and sess.get("aftercare_context"):
+        reply = await aftercare.handle_reply(phone, text, enrollee, sess)
+    else:
+        reply = await front_desk.handle(phone, text, enrollee, sess.get("messages", []))
 
     session.append_message(phone, "user", text)
     session.append_message(phone, "assistant", reply)
