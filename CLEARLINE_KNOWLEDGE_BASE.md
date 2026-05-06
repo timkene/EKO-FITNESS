@@ -218,10 +218,15 @@ Clearline International Limited is a health insurance company (HMO) that:
   - **Claims**: Sum `approvedamount` from CLAIMS DATA
     - Default date for spending/utilization analysis: `encounterdatefrom`
     - Use `datesubmitted` only when explicitly requested
+    - **Default company scope**: `TRY_CAST(nhisgroupid AS BIGINT) = groupid` (from GROUPS/GROUP_CONTRACT)
+    - For contract-period company analysis, apply `encounterdatefrom BETWEEN contract_start AND contract_end`
+    - For this official method, include `chargeamount > 0` to remove zero-value claim lines
   - **Unclaimed PA**: Sum `granted` from PA DATA where PA has not yet been claimed
     - Build PA panumber set from PA DATA for the same scope and period
     - Build claims panumber set from CLAIMS DATA for the same scope and period
     - Unclaimed PA panumbers = PA panumbers not present in the claims panumber set
+    - **Default company scope**: `LOWER(groupname)` match on PA side + `pastatus = 'AUTHORIZED'`
+    - Normalize panumber during exclusion checks to avoid decimal artifacts (`0.0` vs `0`) using numeric cast on both sides
 - This gives the total amount spent and authorized-but-not-yet-claimed for the same period.
 
 ### MLR Calculation Period
@@ -400,6 +405,12 @@ Clearline International Limited is a health insurance company (HMO) that:
 - MLR = (Total Medical Spending / Total Premium Received) × 100%
 - Total Medical Spending = Claims (`approvedamount`, usually filtered by `encounterdatefrom`) + Unclaimed PA (`granted` where PA panumber is not in the claims panumber set for the same scope/period)
 - Total Premium Received = Sum of CLIENT_CASH_RECEIVED.assets_amount for the contract period
+- **Adopted default for company-level reporting (2026-05):**
+  - Claims scope by `TRY_CAST(nhisgroupid AS BIGINT)=groupid`
+  - Claims date by `encounterdatefrom` within period
+  - Claims quality filter `chargeamount > 0`
+  - Unclaimed PA filtered to `pastatus='AUTHORIZED'` and same period on `requestdate`
+  - Exclude claimed panumbers using normalized numeric cast on both PA and claims panumbers
 
 **Important Notes:**
 - Always compare like-for-like periods (full contract periods, not partial)
