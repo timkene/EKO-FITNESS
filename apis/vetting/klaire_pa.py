@@ -1453,21 +1453,24 @@ def check_cost_effectiveness(
     encounter_type: str = "OUTPATIENT",
 ) -> Dict:
     """
-    Evaluate whether the prescribed regimen is the most cost-effective
-    evidence-based option, or whether cheaper therapeutic equivalents exist.
+    Evaluate whether the FULL regimen (basket already approved + current batch)
+    is the most cost-effective evidence-based option.
+
+    Basket items are already approved and cannot be auto-denied by this system,
+    but they are included in the assessment. When a basket drug + current batch
+    together form a sub-optimal regimen, the AI:
+      - Denies the current-batch redundant drug(s)
+      - Returns a basket_action instruction naming the basket drug the agent
+        should ask the provider to return/exchange
 
     Flags patterns like:
-    - Multiple drugs when one drug covers all diagnoses (e.g. clarithromycin
-      covers both H. pylori eradication AND URTI — cefuroxime is then redundant)
-    - Combination brand drugs when one component alone suffices (e.g.
-      paracetamol + orphenadrine when paracetamol alone is appropriate)
-    - Expensive drug when a cheaper equivalent has the same spectrum/efficacy
-    - Polypharmacy where guideline-recommended regimen uses fewer drugs
+    - Multiple drugs when one covers all diagnoses (clarithromycin dual-coverage)
+    - Combination brands when one component alone suffices (paracetamol+orphenadrine)
+    - Expensive drug when cheaper equivalent exists
+    - Polypharmacy where guideline regimen uses fewer drugs
 
-    Never auto-denies. Always PENDING_REVIEW if flagged.
-    Returns recommended affordable alternatives with evidence backing.
+    Never auto-denies. Always escalates to PENDING_REVIEW if flagged.
     """
-    # Only assess current-request, non-denied items — basket items are context only
     active = [p for p in procedures if not p.get("from_basket")
               and p.get("individual_decision") != "DENY"]
     basket = [p for p in procedures if p.get("from_basket")]
@@ -1481,62 +1484,73 @@ def check_cost_effectiveness(
 
     def _fmt(p: Dict) -> str:
         diag_str = ", ".join(f"{d['code']} ({d['name']})" for d in p.get("diagnoses", []))
-        status = "[ALREADY APPROVED]" if p.get("from_basket") else (
+        status = "[ALREADY APPROVED TODAY — cannot auto-deny, agent must act]" if p.get("from_basket") else (
             "[PENDING REVIEW]" if p.get("individual_decision") == "PENDING_REVIEW" else "[APPROVED]"
         )
         return f"- {p['code']}: {p['name']}  {status}" + (f"  [for: {diag_str}]" if diag_str else "")
 
     active_lines = "\n".join(_fmt(p) for p in active)
-    basket_lines = ("\nALREADY APPROVED THIS SESSION (context only):\n"
-                    + "\n".join(_fmt(p) for p in basket)) if basket else ""
+    basket_section = (
+        "\nALREADY APPROVED TODAY (cannot be auto-denied — but MUST be included in full regimen assessment):\n"
+        + "\n".join(_fmt(p) for p in basket)
+    ) if basket else ""
+
+    basket_instruction = (
+        "\nIMPORTANT — BASKET ITEMS: The drugs marked [ALREADY APPROVED TODAY] have already been "
+        "dispensed/approved earlier this encounter. This system CANNOT deny them automatically. "
+        "However, if including them makes the overall regimen sub-optimal or redundant, you should:\n"
+        "  1. Deny the CURRENT REQUEST drug(s) that are redundant given the basket drug\n"
+        "  2. Set basket_action in your recommendation: name the basket drug the provider should "
+        "return/exchange and what it should be switched to. The agent will call the provider.\n"
+        "  Example: basket has Cefuroxime (URTI). Current request: Amoxicillin + Metronidazole (H. pylori). "
+        "Optimal: Clarithromycin triple therapy covers BOTH. → Deny Metronidazole, set basket_action: "
+        "'Provider should return Cefuroxime and substitute Clarithromycin 500mg BD x 14 days as part of "
+        "H. pylori triple therapy which also covers URTI'."
+    ) if basket else ""
 
     prompt = f"""You are a senior HMO clinical pharmacist in Nigeria ({context}) conducting a cost-effectiveness review.
 
-Your role: think like a health insurer. Identify whether ANY drug in this regimen is:
-1. Redundant because another drug already covers that diagnosis/spectrum
+Your role: think like a health insurer. Assess the ENTIRE regimen — including already-approved basket drugs — and identify whether any drug in this request is:
+1. Redundant because another drug (in current batch OR basket) already covers that diagnosis/spectrum
 2. A more expensive option when a cheaper, clinically equivalent alternative exists
 3. One component of a combination when the combination is unnecessary
-4. A brand combination drug (e.g. paracetamol + orphenadrine as a single brand) when one component alone is sufficient
+4. A brand combination drug when one component alone is sufficient
 
-ACTIVE PROCEDURES IN THIS REQUEST:
+ACTIVE PROCEDURES IN THIS REQUEST (these CAN be denied):
 {active_lines}
-{basket_lines}
+{basket_section}
+{basket_instruction}
 
 CLINICAL RULES TO APPLY:
-- Clarithromycin triple therapy (Amoxicillin 1g BD + Clarithromycin 500mg BD + PPI x 14 days) is the WHO/ACG first-line for H. pylori. The clarithromycin ALSO covers acute URTI pathogens (S. pneumoniae, H. influenzae via 14-OH metabolite, M. catarrhalis). If H. pylori drugs are prescribed AND a separate URTI antibiotic is added, the URTI antibiotic may be redundant if switching to clarithromycin-based triple therapy.
-- Paracetamol alone (500-1000mg QDS) is sufficient for mild-moderate pain. Adding orphenadrine (muscle relaxant) is rarely justified without specific myospasm diagnosis. Combination brands (paracetamol + orphenadrine, paracetamol + codeine) cost more and add unnecessary drug exposure.
-- Diclofenac alone (50mg TDS) provides analgesia AND anti-inflammatory effect — co-prescribing paracetamol is rarely additive for mild pain without specific indication.
-- For simple uncomplicated URTI: amoxicillin 500mg TDS is cheaper first-line. Cefuroxime/azithromycin should only be prescribed if allergy or documented amoxicillin failure.
-- Always consider the cheapest effective option. Generic equivalents should be flagged when branded drugs are prescribed.
-- ONLY flag when you have strong clinical evidence. If in doubt, do NOT flag — do not second-guess clinically complex decisions.
-
-For each drug you flag, you MUST provide:
-1. The SPECIFIC cheaper alternative with dose and duration
-2. The clinical evidence (guideline name, principle)
-3. The estimated cost benefit
+- Clarithromycin triple therapy (Amoxicillin 1g BD + Clarithromycin 500mg BD + PPI x 14 days) is the WHO/ACG first-line for H. pylori. Clarithromycin ALSO covers URTI pathogens (S. pneumoniae, H. influenzae via 14-OH metabolite, M. catarrhalis). If a URTI antibiotic was already approved AND H. pylori drugs are now requested, consider switching everything to clarithromycin triple therapy — deny redundant current-batch drugs and flag the basket antibiotic for return.
+- Paracetamol alone (500-1000mg QDS) is sufficient for mild-moderate pain. Orphenadrine/codeine addition is rarely justified without specific diagnosis. Combination brands cost more unnecessarily.
+- Diclofenac alone (50mg TDS) covers analgesia AND inflammation — adding paracetamol is rarely additive for mild pain.
+- For simple uncomplicated URTI: amoxicillin 500mg TDS is cheaper first-line. Cefuroxime/azithromycin only if allergy or documented failure.
+- Always consider the cheapest effective option. ONLY flag with strong clinical evidence — do not second-guess complex decisions.
 
 Respond in JSON only (no markdown):
 {{
   "cost_effective": true or false,
   "confidence": 0-100,
-  "reasoning": "One concise sentence summarising the overall cost-effectiveness assessment.",
+  "reasoning": "One concise sentence on overall cost-effectiveness of the full regimen.",
   "recommendations": [
     {{
-      "procedure_code": "code of drug to deny/substitute",
-      "procedure_name": "name of drug",
-      "reason": "Why this drug is not cost-effective given the regimen",
-      "recommended_alternative": "Specific cheaper alternative with dose, duration, and guideline reference. State clearly what to prescribe instead.",
+      "procedure_code": "code of CURRENT REQUEST drug to deny/substitute",
+      "procedure_name": "name of that drug",
+      "reason": "Why this drug is not cost-effective given the full regimen (basket + current)",
+      "recommended_alternative": "Specific cheaper alternative with dose, duration, guideline reference.",
+      "basket_action": "If a basket drug should be returned/exchanged as part of the fix, state exactly: 'Provider should return [drug name] and substitute [alternative with dose]'. Leave empty string if no basket change needed.",
       "deny": true or false
     }}
   ]
 }}
 
-RULES:
-- recommendations must only include drugs from ACTIVE PROCEDURES list (never basket items).
+STRICT RULES:
+- recommendations must only include drugs from ACTIVE PROCEDURES IN THIS REQUEST (never basket items — they are listed separately and cannot be auto-denied).
 - Set deny=true only for drugs that are clearly redundant or replaceable with strong evidence.
-- Set deny=false for drugs worth flagging as a concern but not denying outright.
-- If cost_effective=true, recommendations must be empty.
-- Be specific in recommended_alternative — name the exact drug, dose, and frequency."""
+- Set deny=false for concerns without strong evidence.
+- If cost_effective=true, recommendations must be an empty array.
+- basket_action must be a string (empty string if not applicable — never null)."""
 
     ai = _call_claude(prompt)
     cost_effective  = bool(ai.get("cost_effective", True))
@@ -1544,7 +1558,7 @@ RULES:
     reasoning       = ai.get("reasoning", "")
     recommendations = ai.get("recommendations", [])
 
-    # Only keep recommendations for deny=true with a valid active procedure code
+    # Only keep deny=true recommendations for valid active procedure codes
     active_codes = {p["code"].upper() for p in active}
     deny_recs = [
         r for r in recommendations
@@ -1812,13 +1826,16 @@ def validate_pa_request(
     cost_check = check_cost_effectiveness(proc_combo_input, encounter_type)
 
     for rec in cost_check.get("recommendations", []):
-        deny_code = (rec.get("procedure_code") or "").upper()
-        alternative = rec.get("recommended_alternative", "")
-        deny_reason = rec.get("reason", "")
+        deny_code      = (rec.get("procedure_code") or "").upper()
+        alternative    = rec.get("recommended_alternative", "")
+        deny_reason    = rec.get("reason", "")
+        basket_action  = (rec.get("basket_action") or "").strip()
+
         flag_reason = (
             f"Cost-effectiveness check (Rule 17): {rec.get('procedure_name', deny_code)} "
             f"is not the most cost-effective option for this regimen. {deny_reason}"
-            + (f" Recommended alternative: {alternative}" if alternative else "")
+            + (f" Recommended alternative: {alternative}." if alternative else "")
+            + (f" ACTION REQUIRED — {basket_action}" if basket_action else "")
         )
         for res in results:
             if res.get("procedure_code", "").upper() == deny_code and res.get("decision") != "DENY":
