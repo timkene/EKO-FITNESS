@@ -689,16 +689,13 @@ with st.sidebar:
     enrollee_id    = st.text_input("Enrollee ID *", placeholder="CL/OCTA/723449/2023-A", key="s_enr")
 
     _providers = load_providers()
-    _prov_options = [""] + [f"{p['name']} ({p['state']}) — {p['id']}" for p in _providers]
-    _prov_sel = st.selectbox(
-        "Provider *",
-        options=_prov_options,
-        index=0,
-        placeholder="Search provider name…",
-        key="s_prov_sel",
-    )
-    provider_id   = _prov_sel.rsplit("— ", 1)[-1].strip() if _prov_sel else ""
-    hospital_name = _prov_sel.split(" (")[0].strip()      if _prov_sel else ""
+    provider_id = st.text_input("Provider ID *", placeholder="e.g. 445", key="s_prov_id").strip()
+    _prov_match = next((p for p in _providers if str(p["id"]).lstrip("0") == provider_id.lstrip("0")), None)
+    hospital_name = _prov_match["name"] if _prov_match else ""
+    if provider_id and _prov_match:
+        st.caption(f"🏥 {hospital_name} — {_prov_match.get('state','')}")
+    elif provider_id:
+        st.caption("⚠️ Provider ID not found in directory")
 
     encounter_date = st.date_input("Encounter Date", value=date.today(), key="s_date")
     st.divider()
