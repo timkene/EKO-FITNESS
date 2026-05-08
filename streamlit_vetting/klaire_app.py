@@ -133,13 +133,16 @@ def load_specialist_codes():
         return {}
 
 
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_providers() -> list:
-    """Return list of {id, name, state, lga} for sidebar dropdown."""
+    """Return list of {id, name, state, lga} for provider ID lookup."""
     try:
         r = requests.get(f"{API}/api/v1/klaire/providers", timeout=15)
         r.raise_for_status()
-        return r.json().get("providers", [])
+        providers = r.json().get("providers", [])
+        if not providers:
+            raise ValueError("Empty provider list")
+        return providers
     except Exception:
         return []
 
