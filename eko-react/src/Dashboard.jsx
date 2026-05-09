@@ -284,6 +284,10 @@ export default function Dashboard() {
                 <p className="text-slate-400 text-xs uppercase font-bold mb-1">Rating per matchday</p>
                 <p className="text-sm font-bold text-slate-300">{memberStats.stats.matchday_ratings?.length ? `${memberStats.stats.matchday_ratings.length} matchdays` : '—'}</p>
               </div>
+              <div className="rounded-lg bg-slate-800/50 p-3">
+                <p className="text-slate-400 text-xs uppercase font-bold mb-1">🏆 Leagues won</p>
+                <p className="text-2xl font-black text-yellow-400">{memberStats.stats.leagues_won ?? 0}</p>
+              </div>
             </div>
             {memberStats.stats.matchday_ratings?.length > 0 && (
               <details className="mt-4">

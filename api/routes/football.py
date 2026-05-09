@@ -1252,6 +1252,7 @@ def _player_career_stats(conn, player_id: int, _cache: Optional[dict] = None) ->
     reds = cards[1] or 0
     matchdays_present = 0
     clean_sheets = 0
+    leagues_won = 0
     matchday_ratings_list = []
     md_rows = conn.execute("""
         SELECT mgm.matchday_id, m.sunday_date, COALESCE(m.matchday_ended, false)
@@ -1277,6 +1278,18 @@ def _player_career_stats(conn, player_id: int, _cache: Optional[dict] = None) ->
                     clean_sheets += _cache[key]
                 else:
                     clean_sheets += _group_clean_sheet_fixtures_count(conn, mid, g[0])
+                if _is_present(conn, mid, player_id):
+                    if _cache is not None:
+                        if ("league", mid) not in _cache:
+                            _cache[("league", mid)] = _league_table(conn, mid)
+                        table = _cache[("league", mid)]
+                    else:
+                        table = _league_table(conn, mid)
+                    for pos, row in enumerate(table, 1):
+                        if row["group_id"] == g[0]:
+                            if pos == 1:
+                                leagues_won += 1
+                            break
     # Divide by total ended matchdays (not games played) so absences count as 0.
     # Leo played 1 game → score/5; Teejay played 2 games → sum/5. Drops every week you don't show.
     total_ended_mds = conn.execute(
@@ -1300,6 +1313,7 @@ def _player_career_stats(conn, player_id: int, _cache: Optional[dict] = None) ->
         "clean_sheets": clean_sheets, "matchdays_present": matchdays_present,
         "matchday_ratings": matchday_ratings_list, "average_rating": avg,
         "motm_count": len(motm_matchdays_list), "motm_matchdays": motm_matchdays_list,
+        "leagues_won": leagues_won,
     }
 
 
@@ -2367,6 +2381,10 @@ def _bulk_leaderboard_stats(conn, player_rows: list) -> list:
                 rating_list.append({"matchday_id": mid, "sunday_date": sunday_date, "rating": rating})
 
         avg = round(sum(r["rating"] for r in rating_list) / total_ended, 2) if rating_list else 0.0
+        leagues_won = sum(
+            1 for (mid, gid, _, ended) in md_list
+            if ended and mid in present_mids and league_pos.get((mid, gid)) == 1
+        )
         out.append({
             "player_id": pid, "baller_name": baller, "jersey_number": jersey or 0,
             "goals": goals_by_pid.get(pid, 0),
@@ -2377,6 +2395,7 @@ def _bulk_leaderboard_stats(conn, player_rows: list) -> list:
             "matchdays_present": matchdays_present,
             "average_rating": avg,
             "motm_count": len(motm[pid]),
+            "leagues_won": leagues_won,
         })
     return out
 
