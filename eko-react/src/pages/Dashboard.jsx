@@ -318,6 +318,10 @@ export default function Dashboard() {
                       <span className="text-[9px] text-amber-400 uppercase font-black tracking-wide">MOTM</span>
                       <span className="text-base font-black text-amber-400 leading-none">{stats.motm_count ?? 0}</span>
                     </div>
+                    <div className="flex items-center justify-between bg-yellow-500/10 border border-yellow-500/25 rounded-lg px-2.5 py-1.5 mt-1.5">
+                      <span className="text-[9px] text-yellow-400 uppercase font-black tracking-wide">🏆 Leagues</span>
+                      <span className="text-base font-black text-yellow-400 leading-none">{stats.leagues_won ?? 0}</span>
+                    </div>
                     {memberStats?.global_rank && (
                       <button onClick={() => navigate('/leaderboard')} className="mt-1.5 text-[9px] text-primary font-bold uppercase tracking-widest text-right w-full">
                         #{memberStats.global_rank} Global →

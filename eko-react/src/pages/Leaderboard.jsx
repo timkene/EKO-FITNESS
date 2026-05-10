@@ -84,6 +84,12 @@ function PlayerModal({ player, onClose }) {
               <p className="text-amber-400 font-black text-xl">★ ×{player.motm_count}</p>
             </div>
           )}
+          {(player.leagues_won ?? 0) > 0 && (
+            <div className="col-span-2 bg-yellow-500/10 border border-yellow-500/25 rounded-xl p-3">
+              <p className="text-yellow-400 text-[10px] uppercase font-black mb-0.5">🏆 Leagues Won</p>
+              <p className="text-yellow-400 font-black text-xl">{player.leagues_won}</p>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -98,6 +104,7 @@ const FILTERS = [
   { key: 'present',      label: 'Present',   sort: r => -r.matchdays_present },
   { key: 'clean_sheets', label: 'C/Sheet',   sort: r => -r.clean_sheets },
   { key: 'motm',         label: 'MOTM',      sort: r => -(r.motm_count ?? 0) },
+  { key: 'leagues_won',  label: '🏆 Leagues', sort: r => -(r.leagues_won ?? 0) },
 ];
 
 export default function Leaderboard() {
@@ -312,6 +319,7 @@ export default function Leaderboard() {
                     <th className={`text-center py-3 px-3 ${activeFilter === 'clean_sheets' ? 'text-primary' : ''}`}>CS</th>
                     <th className={`text-center py-3 px-3 ${activeFilter === 'present' ? 'text-primary' : ''}`}>P</th>
                     <th className={`text-center py-3 px-3 ${activeFilter === 'motm' ? 'text-amber-400' : ''}`}>★</th>
+                    <th className={`text-center py-3 px-3 ${activeFilter === 'leagues_won' ? 'text-yellow-400' : ''}`}>🏆</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -371,6 +379,9 @@ export default function Leaderboard() {
                             <td className={`py-3 px-3 text-center font-bold ${activeFilter === 'present' ? 'text-primary' : 'text-slate-300'}`}>{row.matchdays_present}</td>
                             <td className={`py-3 px-3 text-center font-bold ${activeFilter === 'motm' ? 'text-amber-400' : 'text-slate-500'}`}>
                               {(row.motm_count ?? 0) > 0 ? `★${row.motm_count}` : '—'}
+                            </td>
+                            <td className={`py-3 px-3 text-center font-bold ${activeFilter === 'leagues_won' ? 'text-yellow-400' : 'text-slate-500'}`}>
+                              {(row.leagues_won ?? 0) > 0 ? `🏆${row.leagues_won}` : '—'}
                             </td>
                           </tr>
                         );
