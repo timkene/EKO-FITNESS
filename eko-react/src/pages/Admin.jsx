@@ -1249,7 +1249,7 @@ export default function Admin() {
                   <div className="bg-slate-900/40 border border-primary/10 rounded-xl p-6">
                     <h4 className="font-bold mb-4">Fixtures</h4>
                     {matchdayFixtures.length === 0 ? (
-                      <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg" onClick={async () => { showToast(''); try { await generateFixtures(selectedMatchdayId, getAdminToken()); showToast('Fixtures generated.'); fetchMatchdays(); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Generate fixtures</button>
+                      <button type="button" className="py-2 px-4 bg-primary text-background-dark font-bold rounded-lg" onClick={async () => { showToast(''); try { await generateFixtures(selectedMatchdayId, getAdminToken()); showToast('Fixtures generated.'); refreshFixtures(selectedMatchdayId); } catch (e) { showToast(e.response?.data?.detail || 'Failed'); } }}>Generate fixtures</button>
                     ) : (
                       <>
                         <div className="flex flex-wrap gap-2 mb-4">
