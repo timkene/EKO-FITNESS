@@ -9,7 +9,7 @@ import requests
 import pandas as pd
 from datetime import date
 
-API  = "http://localhost:8000"
+API  = "http://localhost:8002"
 BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 st.set_page_config(page_title="KLAIRE", page_icon="🤖", layout="wide")
