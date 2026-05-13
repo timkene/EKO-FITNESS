@@ -45,9 +45,11 @@ from . import mongo_db
 from .drug_apis import (
     rxnorm_lookup,
     rxclass_get_drug_classes,
+    rxclass_get_may_treat,
     is_high_risk_class,
     who_eml_lookup,
     openfda_get_indications,
+    openfda_get_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -748,43 +750,6 @@ def _validate_one_procedure(
 
 # ── Drug-Drug Interaction Check (OpenFDA + AI) ───────────────────────────────
 
-_OPENFDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
-
-
-def _openfda_get_interactions(drug_name: str) -> str:
-    """
-    Query OpenFDA for the drug_interactions section of a drug's label.
-    Returns the interaction text, or empty string on failure/not found.
-    Strips generic names from brand/dosage strings like 'Amlodipine 10mg' → 'amlodipine'.
-    """
-    # Strip dosage and route: "Amlodipine 10mg" → "amlodipine"
-    import re as _re
-    clean = _re.sub(r'\s+\d+[\s./]*(mg|mcg|g|ml|iu|units?|tabs?|caps?)\b.*', '', drug_name, flags=_re.I).strip()
-    if len(clean) < 3:
-        return ""
-    try:
-        q   = urllib.parse.quote(f'"{clean}"')
-        url = f"{_OPENFDA_LABEL_URL}?search=openfda.generic_name:{q}&limit=1"
-        req = urllib.request.Request(url, headers={"User-Agent": "Clearline-KLAIRE/1.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-        results = data.get("results", [])
-        if not results:
-            # Fallback: search by drug name in full text
-            q2  = urllib.parse.quote(clean)
-            url = f"{_OPENFDA_LABEL_URL}?search=drug_interactions:{q2}&limit=1"
-            req = urllib.request.Request(url, headers={"User-Agent": "Clearline-KLAIRE/1.0"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
-            results = data.get("results", [])
-        if not results:
-            return ""
-        interactions = results[0].get("drug_interactions", [])
-        return " ".join(interactions[:3])   # cap at 3 sections to stay within token budget
-    except Exception as e:
-        logger.debug(f"OpenFDA DDI lookup failed for '{drug_name}': {e}")
-        return ""
-
 
 def check_drug_drug_interactions(
     proc_code: str,
@@ -856,25 +821,35 @@ def check_drug_drug_interactions(
             "note":      "RxClass pre-filter: no high-risk drug classes detected — DDI check skipped",
         }
 
-    # Get interaction text from OpenFDA
-    interaction_text = _openfda_get_interactions(proc_name)
-    if not interaction_text:
-        return {"triggered": False, "note": "No OpenFDA interaction data found"}
+    # Get full drug label from OpenFDA (single call — interactions + contraindications)
+    label = openfda_get_label(proc_name)
+    interaction_text   = label["drug_interactions"]
+    contraindications  = label["contraindications"]
+    if not interaction_text and not contraindications:
+        return {"triggered": False, "note": "No OpenFDA label data found"}
 
-    # Ask Claude to match prior meds against the interaction warning
+    # Ask Claude to match prior meds against interaction warnings and contraindications
     prior_list = "\n".join(f"  - {m['code']}: {m['name']} (on {m['date']})" for m in prior_meds[-20:])
+
+    contra_section = (
+        f"\nFDA label contraindications:\n{contraindications[:800]}"
+        if contraindications else ""
+    )
+
     prompt = f"""You are a clinical pharmacist reviewing a Nigerian HMO PA request for drug safety.
 
 The patient is being prescribed:
   {proc_code}: {proc_name}
 
-This drug's known interaction warnings (from FDA label):
+FDA label drug interactions section:
 {interaction_text[:1200]}
+{contra_section}
 
 The patient's prior medications (last 30 days from PA records):
 {prior_list}
 
-Task: identify if any prior medication is listed as a dangerous interaction with the requested drug.
+Task: identify if any prior medication is listed as a dangerous interaction with the requested drug,
+OR if any prior medication / active condition is listed in the contraindications.
 Only flag CLINICALLY SIGNIFICANT interactions (major/severe — not theoretical or minor).
 Ignore interactions with drugs not present in the prior medication list.
 
@@ -1139,21 +1114,71 @@ def check_openfda_indication(
     if not proc_code.upper().startswith("DRG"):
         return {"triggered": False}
 
-    indications = openfda_get_indications(proc_name)
-    if not indications:
-        return {"triggered": False, "note": "No FDA label data available"}
+    # Fetch structured MED-RT data and full FDA label in parallel (both cached)
+    may_treat_data = rxclass_get_may_treat(proc_name)
+    label          = openfda_get_label(proc_name)
+    indications    = label["indications"]
+    contraindicated_conditions = label["contraindications"]
+
+    if not indications and not may_treat_data["may_treat"]:
+        return {"triggered": False, "note": "No FDA label or MED-RT data available"}
+
+    # MED-RT structured pre-check: if drug explicitly may_treat a condition that
+    # closely matches the diagnosis name, skip AI and fast-approve.
+    diag_lower = diagnosis_name.lower()
+    for condition in may_treat_data["may_treat"]:
+        cond_lower = condition.lower()
+        # Match if either name contains a meaningful keyword from the other
+        if (cond_lower in diag_lower or diag_lower in cond_lower or
+                any(w in cond_lower for w in diag_lower.split() if len(w) > 4)):
+            return {
+                "triggered":       False,
+                "indicated":       True,
+                "off_label":       False,
+                "confidence":      95,
+                "reasoning":       f"MED-RT structured data: {proc_name} may_treat '{condition}' — matches submitted diagnosis.",
+                "requires_review": False,
+                "source":          "rxclass_medrt",
+            }
+
+    # MED-RT CI_with pre-check: if drug is explicitly contraindicated with the
+    # submitted diagnosis → flag immediately without AI call.
+    for condition in may_treat_data["ci_with"]:
+        cond_lower = condition.lower()
+        if (cond_lower in diag_lower or diag_lower in cond_lower or
+                any(w in cond_lower for w in diag_lower.split() if len(w) > 4)):
+            return {
+                "triggered":       True,
+                "indicated":       False,
+                "off_label":       True,
+                "confidence":      92,
+                "reasoning":       f"MED-RT structured data: {proc_name} is contraindicated with '{condition}' — matches submitted diagnosis.",
+                "requires_review": True,
+                "source":          "rxclass_medrt_ci",
+            }
+
+    # AI fallback — include all structured data as context for richer reasoning
+    may_treat_str = ", ".join(may_treat_data["may_treat"][:15]) or "not available"
+    ci_with_str   = ", ".join(may_treat_data["ci_with"][:10])   or "none listed"
 
     prompt = f"""You are a clinical pharmacist reviewing a Nigerian HMO PA request.
 
 Drug requested: {proc_code} — {proc_name}
 Submitted diagnosis: {diagnosis_code} — {diagnosis_name}
 
-FDA label indications_and_usage section (excerpt):
-{indications[:1200]}
+MED-RT structured indications (conditions this drug may_treat):
+{may_treat_str}
+
+MED-RT disease contraindications (conditions this drug is CI_with):
+{ci_with_str}
+
+FDA label indications_and_usage (excerpt):
+{indications[:1000]}
 
 Question: Is {proc_name} indicated (standard approved use) for the diagnosis "{diagnosis_name}"?
-Consider both the primary indication AND commonly accepted uses (e.g. amoxicillin covers many infections).
+Consider primary indications AND commonly accepted clinical uses.
 Flag as off-label ONLY if the drug clearly has no clinical basis for this diagnosis.
+If it appears in the MED-RT may_treat list or has a closely related indication, it is indicated.
 
 Respond in JSON only (no markdown):
 {{
@@ -1171,7 +1196,7 @@ Respond in JSON only (no markdown):
     try:
         client = _anthropic.Anthropic(api_key=api_key)
         resp   = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
             max_tokens=300, temperature=0,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -1192,7 +1217,7 @@ Respond in JSON only (no markdown):
             "confidence":      confidence,
             "reasoning":       reasoning,
             "requires_review": off_label and not indicated,
-            "source":          "openfda+ai",
+            "source":          "openfda+medrt+ai",
         }
     except Exception as e:
         logger.debug(f"OpenFDA indication check failed for {proc_code}: {e}")

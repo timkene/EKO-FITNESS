@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 # ── Module-level caches (per-process, no expiry) ─────────────────────────────
 _rxnorm_cache: Dict[str, Optional[Dict]]  = {}   # cleaned_name → {rxcui, class, ...} | None
 _who_eml_cache: Dict[str, Dict]           = {}   # cleaned_name → {found, essential, atc, ...}
-_openfda_ind_cache: Dict[str, str]        = {}   # cleaned_name → indications text
+_openfda_label_cache: Dict[str, Dict]     = {}   # cleaned_name → {indications, drug_interactions, contraindications}
+_rxclass_may_treat_cache: Dict[str, Dict] = {}   # rxcui → {may_treat: [...], ci_with: [...]}
 
 # ── High-risk drug classes: trigger DDI check ─────────────────────────────────
 # These are RxClass/ATC class substrings that warrant checking for interactions.
@@ -100,10 +101,11 @@ def rxnorm_lookup(drug_name: str, timeout: int = 8) -> Optional[Dict]:
 
         best  = candidates[0]
         rxcui = best.get("rxcui")
-        score = int(best.get("score", 0))
+        score = float(best.get("score", 0))
         rx_name = best.get("name", drug_name)
 
-        if not rxcui or score < 60:
+        # approximateTerm scores exact matches at ~10-15, not 0-100
+        if not rxcui or score < 3:
             _rxnorm_cache[cleaned] = None
             return None
 
@@ -248,50 +250,117 @@ def who_eml_lookup(drug_name: str) -> Dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# OpenFDA — drug label indications_and_usage
+# OpenFDA — full drug label (one call, three fields)
 # ══════════════════════════════════════════════════════════════════════════════
 
 _OPENFDA_LABEL_URL = "https://api.fda.gov/drug/label.json"
 
+_EMPTY_LABEL: Dict = {"indications": "", "drug_interactions": "", "contraindications": ""}
 
-def openfda_get_indications(drug_name: str) -> str:
+
+def _fetch_openfda_label(drug_name: str, timeout: int = 5) -> Dict:
     """
-    Fetch the indications_and_usage section from the FDA drug label.
-    Returns the text (capped at 1500 chars) or empty string on failure.
+    Single OpenFDA call returning indications_and_usage, drug_interactions,
+    and contraindications in one dict.  Results cached per cleaned drug name.
     """
     cleaned = _clean_drug_name(drug_name)
     if not cleaned or len(cleaned) < 3:
-        return ""
+        return _EMPTY_LABEL
 
-    if cleaned in _openfda_ind_cache:
-        return _openfda_ind_cache[cleaned]
+    if cleaned in _openfda_label_cache:
+        return _openfda_label_cache[cleaned]
+
+    def _fetch(url: str) -> list:
+        req = urllib.request.Request(url, headers={"User-Agent": "Clearline-KLAIRE/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read()).get("results", [])
 
     try:
-        q   = urllib.parse.quote(f'"{cleaned}"')
-        url = f"{_OPENFDA_LABEL_URL}?search=openfda.generic_name:{q}&limit=1"
-        req = urllib.request.Request(url, headers={"User-Agent": "Clearline-KLAIRE/1.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-
-        results = data.get("results", [])
+        q       = urllib.parse.quote(f'"{cleaned}"')
+        results = _fetch(f"{_OPENFDA_LABEL_URL}?search=openfda.generic_name:{q}&limit=1")
         if not results:
-            # Fallback: text search
-            url = f"{_OPENFDA_LABEL_URL}?search=indications_and_usage:{urllib.parse.quote(cleaned)}&limit=1"
-            req = urllib.request.Request(url, headers={"User-Agent": "Clearline-KLAIRE/1.0"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read())
-            results = data.get("results", [])
-
+            results = _fetch(
+                f"{_OPENFDA_LABEL_URL}?search=indications_and_usage:{urllib.parse.quote(cleaned)}&limit=1"
+            )
         if not results:
-            _openfda_ind_cache[cleaned] = ""
-            return ""
+            _openfda_label_cache[cleaned] = _EMPTY_LABEL
+            return _EMPTY_LABEL
 
-        ind_sections = results[0].get("indications_and_usage", [])
-        text = " ".join(ind_sections[:2])[:1500]
-        _openfda_ind_cache[cleaned] = text
-        return text
+        label = results[0]
+        result: Dict = {
+            "indications":       " ".join(label.get("indications_and_usage", [])[:2])[:1500],
+            "drug_interactions": " ".join(label.get("drug_interactions",    [])[:3])[:1500],
+            "contraindications": " ".join(label.get("contraindications",    [])[:2])[:800],
+        }
+        _openfda_label_cache[cleaned] = result
+        return result
 
     except Exception as e:
-        logger.debug(f"OpenFDA indications lookup failed for '{drug_name}': {e}")
-        _openfda_ind_cache[cleaned] = ""
-        return ""
+        logger.debug(f"OpenFDA label fetch failed for '{drug_name}': {e}")
+        _openfda_label_cache[cleaned] = _EMPTY_LABEL
+        return _EMPTY_LABEL
+
+
+def openfda_get_indications(drug_name: str) -> str:
+    """Backward-compatible wrapper — returns indications_and_usage text only."""
+    return _fetch_openfda_label(drug_name)["indications"]
+
+
+def openfda_get_label(drug_name: str) -> Dict:
+    """
+    Return full label dict: {indications, drug_interactions, contraindications}.
+    All three fields are strings (empty string if unavailable).
+    """
+    return _fetch_openfda_label(drug_name)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RxClass MED-RT — may_treat / CI_with condition lookups
+# ══════════════════════════════════════════════════════════════════════════════
+
+def rxclass_get_may_treat(drug_name: str) -> Dict:
+    """
+    Return conditions this drug may_treat and conditions it is CI_with
+    (contraindicated with) from MED-RT via RxClass.
+
+    Returns:
+        {
+            "may_treat": ["Sinusitis", "Otitis Media", ...],
+            "ci_with":   ["Peptic Ulcer", ...]   # disease contraindications
+        }
+    Both lists are empty if the drug is not found or RxClass unavailable.
+    """
+    result = rxnorm_lookup(drug_name)
+    if not result:
+        return {"may_treat": [], "ci_with": []}
+    rxcui = result.get("rxcui")
+    if not rxcui:
+        return {"may_treat": [], "ci_with": []}
+
+    if rxcui in _rxclass_may_treat_cache:
+        return _rxclass_may_treat_cache[rxcui]
+
+    may_treat: List[str] = []
+    ci_with:   List[str] = []
+
+    for rela, target in (("may_treat", may_treat), ("CI_with", ci_with)):
+        try:
+            url = (
+                f"https://rxnav.nlm.nih.gov/REST/rxclass/class/byRxcui.json"
+                f"?rxcui={rxcui}&relaSource=MEDRT&relas={rela}"
+            )
+            req = urllib.request.Request(
+                url, headers={"Accept": "application/json", "User-Agent": "Clearline-KLAIRE/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read())
+            for item in data.get("rxclassDrugInfoList", {}).get("rxclassDrugInfo", []):
+                cn = item.get("rxclassMinConceptItem", {}).get("className", "")
+                if cn and cn not in target:
+                    target.append(cn)
+        except Exception:
+            continue
+
+    out = {"may_treat": may_treat, "ci_with": ci_with}
+    _rxclass_may_treat_cache[rxcui] = out
+    return out
