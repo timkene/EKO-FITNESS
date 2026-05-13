@@ -1124,11 +1124,14 @@ def check_openfda_indication(
         return {"triggered": False, "note": "No FDA label or MED-RT data available"}
 
     # MED-RT structured pre-check: if drug explicitly may_treat a condition that
-    # closely matches the diagnosis name, skip AI and fast-approve.
+    # closely matches the diagnosis name, fast-approve without AI call.
+    # CI_with is intentionally NOT used as a hard gate — MED-RT CI_with captures
+    # relative/trimester-specific cautions (e.g. metronidazole + pregnancy applies
+    # only in first trimester; it IS used safely in second/third). A keyword match
+    # cannot resolve that nuance — pass CI_with to the AI as context only.
     diag_lower = diagnosis_name.lower()
     for condition in may_treat_data["may_treat"]:
         cond_lower = condition.lower()
-        # Match if either name contains a meaningful keyword from the other
         if (cond_lower in diag_lower or diag_lower in cond_lower or
                 any(w in cond_lower for w in diag_lower.split() if len(w) > 4)):
             return {
@@ -1141,23 +1144,8 @@ def check_openfda_indication(
                 "source":          "rxclass_medrt",
             }
 
-    # MED-RT CI_with pre-check: if drug is explicitly contraindicated with the
-    # submitted diagnosis → flag immediately without AI call.
-    for condition in may_treat_data["ci_with"]:
-        cond_lower = condition.lower()
-        if (cond_lower in diag_lower or diag_lower in cond_lower or
-                any(w in cond_lower for w in diag_lower.split() if len(w) > 4)):
-            return {
-                "triggered":       True,
-                "indicated":       False,
-                "off_label":       True,
-                "confidence":      92,
-                "reasoning":       f"MED-RT structured data: {proc_name} is contraindicated with '{condition}' — matches submitted diagnosis.",
-                "requires_review": True,
-                "source":          "rxclass_medrt_ci",
-            }
-
-    # AI fallback — include all structured data as context for richer reasoning
+    # AI fallback — provide all structured data as context so Claude can apply
+    # clinical nuance (e.g. trimester, severity, indication) that keyword matching cannot.
     may_treat_str = ", ".join(may_treat_data["may_treat"][:15]) or "not available"
     ci_with_str   = ", ".join(may_treat_data["ci_with"][:10])   or "none listed"
 
@@ -1169,7 +1157,8 @@ Submitted diagnosis: {diagnosis_code} — {diagnosis_name}
 MED-RT structured indications (conditions this drug may_treat):
 {may_treat_str}
 
-MED-RT disease contraindications (conditions this drug is CI_with):
+MED-RT relative contraindications (CI_with — NOTE: these are often trimester-specific,
+severity-dependent, or relative cautions, NOT absolute contraindications):
 {ci_with_str}
 
 FDA label indications_and_usage (excerpt):
@@ -1177,8 +1166,9 @@ FDA label indications_and_usage (excerpt):
 
 Question: Is {proc_name} indicated (standard approved use) for the diagnosis "{diagnosis_name}"?
 Consider primary indications AND commonly accepted clinical uses.
+For CI_with entries: apply clinical judgment — e.g. metronidazole CI_with Pregnancy is only
+a first-trimester caution; it is routinely used safely in second/third trimester.
 Flag as off-label ONLY if the drug clearly has no clinical basis for this diagnosis.
-If it appears in the MED-RT may_treat list or has a closely related indication, it is indicated.
 
 Respond in JSON only (no markdown):
 {{
