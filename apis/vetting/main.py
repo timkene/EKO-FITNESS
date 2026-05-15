@@ -1694,6 +1694,75 @@ def klaire_submit_review(review_id: str, action: KlaireReviewAction):
                         approved_by=action.reviewed_by or "agent",
                     )
 
+        # Write age/gender learning whenever agent agrees with an APPROVAL
+        if action.action == "AGREE" and status == "HUMAN_APPROVED":
+            enrollee_age    = doc.get("enrollee_age")
+            enrollee_gender = doc.get("enrollee_gender")
+            approved_diags  = list(doc.get("approved_diagnoses", []))
+            now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            approver = action.reviewed_by or "agent"
+
+            if enrollee_age is not None:
+                if enrollee_age < 18:
+                    min_age, max_age, age_label = 0, 17, "pediatric (0–17)"
+                elif enrollee_age < 65:
+                    min_age, max_age, age_label = 18, 64, "adult (18–64)"
+                else:
+                    min_age, max_age, age_label = 65, 120, "elderly (65+)"
+
+                mongo_db.upsert(
+                    "ai_human_procedure_age",
+                    {"procedure_code": proc_code, "min_age": min_age, "max_age": max_age},
+                    {
+                        "procedure_code": proc_code, "min_age": min_age, "max_age": max_age,
+                        "is_valid_for_age": True,
+                        "reason": f"Agent agreed — valid for {age_label}",
+                        "confidence": 85, "ai_reasoning": "",
+                        "approved_by": approver, "approved_date": now_ts,
+                        "usage_count": 0, "last_used": now_ts,
+                    },
+                )
+                for dc in approved_diags:
+                    mongo_db.upsert(
+                        "ai_human_diagnosis_age",
+                        {"diagnosis_code": dc, "min_age": min_age, "max_age": max_age},
+                        {
+                            "diagnosis_code": dc, "min_age": min_age, "max_age": max_age,
+                            "is_valid_for_age": True,
+                            "reason": f"Agent agreed — valid for {age_label}",
+                            "confidence": 85, "ai_reasoning": "",
+                            "approved_by": approver, "approved_date": now_ts,
+                            "usage_count": 0, "last_used": now_ts,
+                        },
+                    )
+
+            if enrollee_gender:
+                mongo_db.upsert(
+                    "ai_human_procedure_gender",
+                    {"procedure_code": proc_code, "gender": enrollee_gender},
+                    {
+                        "procedure_code": proc_code, "gender": enrollee_gender,
+                        "is_valid_for_gender": True,
+                        "reason": f"Agent agreed — valid for {enrollee_gender}",
+                        "confidence": 90, "ai_reasoning": "",
+                        "approved_by": approver, "approved_date": now_ts,
+                        "usage_count": 0, "last_used": now_ts,
+                    },
+                )
+                for dc in approved_diags:
+                    mongo_db.upsert(
+                        "ai_human_diagnosis_gender",
+                        {"diagnosis_code": dc, "gender": enrollee_gender},
+                        {
+                            "diagnosis_code": dc, "gender": enrollee_gender,
+                            "is_valid_for_gender": True,
+                            "reason": f"Agent agreed — valid for {enrollee_gender}",
+                            "confidence": 90, "ai_reasoning": "",
+                            "approved_by": approver, "approved_date": now_ts,
+                            "usage_count": 0, "last_used": now_ts,
+                        },
+                    )
+
         else:  # OVERRIDE — agent disagrees with AI; no learning written
             pass
 

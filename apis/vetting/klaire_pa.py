@@ -291,6 +291,29 @@ def _validate_one_procedure(
     Run comprehensive validation for every (procedure, diagnosis) pair,
     then apply merge logic across diagnoses.
     """
+    # Fetch enrollee demographics for learning tables (one lightweight row lookup)
+    _enrollee_age: Optional[int] = None
+    _enrollee_gender: Optional[str] = None
+    if enrollee_id:
+        try:
+            _demo = engine.conn.execute(
+                'SELECT genderid, dob FROM "AI DRIVEN DATA".MEMBER WHERE legacycode = ? LIMIT 1',
+                [enrollee_id],
+            ).fetchone()
+            if _demo:
+                _gid, _dob = _demo
+                _enrollee_gender = "Male" if _gid == 1 else "Female" if _gid == 2 else None
+                if _dob and encounter_date:
+                    from datetime import date as _ddate
+                    _ref = datetime.strptime(encounter_date, "%Y-%m-%d").date()
+                    _dob_d = _dob if isinstance(_dob, _ddate) else datetime.strptime(str(_dob), "%Y-%m-%d").date()
+                    _enrollee_age = (
+                        _ref.year - _dob_d.year
+                        - ((_ref.month, _ref.day) < (_dob_d.month, _dob_d.day))
+                    )
+        except Exception:
+            pass
+
     # Use UI-provided name first (already resolved from dropdown), fall back to DB lookup
     if proc_name_hint:
         proc_name = proc_name_hint
@@ -717,6 +740,8 @@ def _validate_one_procedure(
             "review_notes":        None,
             "reviewed_at":         None,
             "created_at":          datetime.utcnow().isoformat(),
+            "enrollee_age":        _enrollee_age,
+            "enrollee_gender":     _enrollee_gender,
         })
 
     return {
@@ -1672,6 +1697,28 @@ def validate_pa_request(
     from .comprehensive import ComprehensiveVettingEngine
     engine = ComprehensiveVettingEngine(db_path)
 
+    # Fetch enrollee demographics once — stored in review docs for learning tables
+    _enrollee_age: Optional[int] = None
+    _enrollee_gender: Optional[str] = None
+    try:
+        _demo = engine.conn.execute(
+            'SELECT genderid, dob FROM "AI DRIVEN DATA".MEMBER WHERE legacycode = ? LIMIT 1',
+            [enrollee_id],
+        ).fetchone()
+        if _demo:
+            _gid, _dob = _demo
+            _enrollee_gender = "Male" if _gid == 1 else "Female" if _gid == 2 else None
+            if _dob and encounter_date:
+                from datetime import date as _ddate
+                _ref = datetime.strptime(encounter_date, "%Y-%m-%d").date()
+                _dob_d = _dob if isinstance(_dob, _ddate) else datetime.strptime(str(_dob), "%Y-%m-%d").date()
+                _enrollee_age = (
+                    _ref.year - _dob_d.year
+                    - ((_ref.month, _ref.day) < (_dob_d.month, _dob_d.day))
+                )
+    except Exception as _demo_err:
+        logger.warning(f"Could not fetch demographics for {enrollee_id}: {_demo_err}")
+
     # ── Disease Combination Check (request-level) ─────────────────────────────
     # Collect all unique diagnoses across the whole request
     seen_diag_codes: set = set()
@@ -1807,6 +1854,8 @@ def validate_pa_request(
                 "review_notes":       None,
                 "reviewed_at":        None,
                 "created_at":         datetime.utcnow().isoformat(),
+                "enrollee_age":       _enrollee_age,
+                "enrollee_gender":    _enrollee_gender,
             })
 
     for res in results:
